@@ -25,6 +25,22 @@ useful tools for developing ensembles.  The first two versions were
 experimental implementations in Common Lisp and are no longer
 developed or supported.
 
+Epeus
+-----
+
+<p align="right">
+  <i>
+  And a powerful, huge man loomed up at once,<br/>
+  Panopeus' son Epeus, the famous boxing champion.<br/><br/>
+  </i>
+  —Homer. The Iliad.
+</p>
+
+*Epeus* is the implementation of the object system in Iliad.  (Why is
+ this named Epeus?  Well, he was the builder of the Trojan horse,
+ which was, however you look at it, a pretty big
+ [swindle](http://barzilay.org/Swindle/)).
+
 Odysseus
 --------
 
