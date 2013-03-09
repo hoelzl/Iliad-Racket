@@ -77,4 +77,8 @@
 		       "fail-var ~a, ~a, ~a" 1 2 3
 		       'my-var))
 	      "Wrong exception message"))
+
+  ;;; TODO: Add tests for `top-sort' and helpers
+
+
 )

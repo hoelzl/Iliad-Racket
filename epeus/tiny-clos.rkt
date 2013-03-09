@@ -1,5 +1,3 @@
-#lang racket
-
 ;;; Implementation of a CLOS-like object system for racket.
 
 ;;; Based on tiny-clos by Gregor Kizcales
@@ -26,6 +24,12 @@
 ;;; DAMAGES.
 ;;; ***************************************************************************
 
+#lang racket
+
+(require racket/performance-hint)
+(require (only-in srfi/1 find every))
+
+
 ;;; Documentation from the original file:
 
 ;;; TODO: Update this and add it to the scribble documentation.  Most
@@ -50,9 +54,9 @@
 ;;; In addition to calling a generic, the entry points to the default base
 ;;; language are:
 ;;;
-;;;   (MAKE-CLASS list-of-superclasses list-of-slot-names)
+;;;   (MAKE-CLASS name list-of-superclasses list-of-slot-names)
 ;;;   (MAKE-GENERIC-FUNCTION)
-;;;   (MAKE-METHOD list-of-specializers procedure)
+;;;   (MAKE-METHOD #:name [name '-anonymous-] list-of-specializers procedure)
 ;;;   (ADD-METHOD generic method)
 ;;;
 ;;;   (MAKE class . initargs)
@@ -63,7 +67,7 @@
 ;;;   (SLOT-BOUND? object slot-name)
 ;;;
 ;;; So, for example, one might do:
-;;;   (define <position> (make-class (list <object>) (list 'x 'y)))
+;;;   (define <position> (make-class '<position> (list <object>) (list 'x 'y)))
 ;;;   (add-method initialize
 ;;;     (make-method (list <position>)
 ;;;       (lambda (call-next-method pos initargs)
@@ -113,6 +117,37 @@
 ;;;         COMPUTE-METHOD-MORE-SPECIFIC?
 ;;;       COMPUTE-APPLY-METHODS
 
+;;;; Some Utilities
+;;;; ==============
+
+(define-syntax-rule (define-placeholder name)
+  (define (name . args)
+    (error "Not yet implemented")))
+
+(define-syntax-rule (define-placeholders name ...)
+  (begin
+    (define-placeholder name) ...))
+
+(define-syntax-rule (define/macro name macro-name (args ...) body ...)
+  (begin
+    (define (name args ...)
+      body ...)
+    (define-syntax-rule (macro-name args ...)
+      body ...)))
+
+;;; Lists
+;;; -----
+
+(define (position-of elt lst)
+  (let loop ([lst lst] [index 0])
+    (cond [(empty? lst) #f]
+	  [(eq? elt (first lst)) index]
+	  [else (loop (rest lst) (add1 index))])))
+
+
+;;; Exceptions
+;;; ----------
+
 (define-syntax-rule (provide-test-export id0 id ...)
   (module+ test-exports (provide id0 id ...)))
 
@@ -139,65 +174,97 @@
 		  (current-continuation-marks) args))
 	  (loop (cons (car args) fmt-args) (cdr args) (sub1 a))))))
 
-#||
+
+;;; Utilities for Keywords
+;;; ----------------------
+
+(define (keyword->symbol keyword)
+  (string->symbol (keyword->string keyword)))
+
+
+;;; Utilities for Generics
+;;; ----------------------
+
+(define-syntax (generic->property-descriptor stx)
+  (syntax-case stx ()
+    [(_ id) (car (syntax-local-value #'id))]))
+
+
+;;;; Topological Sort and Utilities
+;;;; ------------------------------
+
 ;; A simple topological sort.
 ;; It's in this file so that both TinyClos and Objects can use it.
-;; This is a fairly modified version of code I originally got from Anurag
-;; Mendhekar <anurag@moose.cs.indiana.edu>.
+;; This is a fairly modified version of code I (Gregor Kiczales --tc)
+;; originally got from Anurag Mendhekar <anurag@moose.cs.indiana.edu>.
+;;
 (define (compute-std-cpl c get-direct-supers)
   (top-sort (build-transitive-closure get-direct-supers c)
             (build-constraints get-direct-supers c)
             (std-tie-breaker get-direct-supers)))
+
+;;; TODO: Define exception types and replace direct calls to `error'
+;;; with `raise*'?
+
 (define (top-sort elements constraints tie-breaker)
   (let loop ([elements elements] [constraints constraints] [result '()])
     (if (null? elements)
-      result
-      (let ([can-go-in-now
-             (filter (lambda (x)
-                       (every (lambda (constraint)
-                                (or (not (eq? (cadr constraint) x))
-                                    (memq (car constraint) result)))
-                              constraints))
-                     elements)])
-        (if (null? can-go-in-now)
-          (error 'top-sort "invalid constraints")
-          (let ([choice (if (null? (cdr can-go-in-now))
-                          (car can-go-in-now)
-                          (tie-breaker result can-go-in-now))])
-            (loop (filter (lambda (x) (not (eq? x choice))) elements)
-                  constraints (append result (list choice)))))))))
+	result
+	(let ([can-go-in-now
+	       (filter (lambda (x)
+			 (every (lambda (constraint)
+				   (or (not (eq? (second constraint) x))
+				       (memq (first constraint) result)))
+				 constraints))
+		       elements)])
+	  (if (null? can-go-in-now)
+	      (error 'top-sort "invalid constraints")
+	      (let ([choice (if (null? (rest can-go-in-now))
+				(first can-go-in-now)
+				(tie-breaker result can-go-in-now))])
+		(loop (filter (lambda (x) (not (eq? x choice))) elements)
+		      constraints
+		      (append result (list choice)))))))))
+
 (define (std-tie-breaker get-supers)
   (lambda (partial-cpl min-elts)
     (let loop ([pcpl (reverse partial-cpl)])
-      (let* ([current-elt (car pcpl)]
+      (let* ([current-elt (first pcpl)]
              [ds-of-ce (get-supers current-elt)]
              [common (filter (lambda (x) (memq x ds-of-ce)) min-elts)])
         (if (null? common)
-          (if (null? (cdr pcpl))
-            (error 'std-tie-breaker "nothing valid") (loop (cdr pcpl)))
-          (car common))))))
+	    (if (null? (rest pcpl))
+		(error 'std-tie-breaker "nothing valid")
+		(loop (rest pcpl)))
+	    (first common))))))
+
 (define (build-transitive-closure get-follow-ons x)
   (let track ([result '()] [pending (list x)])
     (if (null? pending)
-      result
-      (let ([next (car pending)])
-        (if (memq next result)
-          (track result (cdr pending))
-          (track (cons next result)
-                 (append (get-follow-ons next) (cdr pending))))))))
+	result
+	(let ([next (first pending)])
+	  (if (memq next result)
+	      (track result (rest pending))
+	      (track (cons next result)
+		     (append (get-follow-ons next) (rest pending))))))))
+
 (define (build-constraints get-follow-ons x)
   (let loop ([elements (build-transitive-closure get-follow-ons x)]
              [this-one '()]
              [result '()])
-    (if (or (null? this-one) (null? (cdr this-one)))
-      (if (null? elements)
-        result
-        (loop (cdr elements)
-              (cons (car elements) (get-follow-ons (car elements)))
-              result))
-      (loop elements
-            (cdr this-one)
-            (cons (list (car this-one) (cadr this-one)) result)))))
+    (if (or (null? this-one) (null? (rest this-one)))
+	(if (null? elements)
+	    result
+	    (loop (rest elements)
+		  (cons (first elements) (get-follow-ons (first elements)))
+		  result))
+	(loop elements
+	      (rest this-one)
+	      (cons (list (first this-one) (second this-one)) result)))))
+
+
+;;;; Instances
+;;;; =========
 
 ;;; Then, we need to build what, in a more real implementation, would be the
 ;;; interface to the memory subsystem: instances and entities.  The former are
@@ -227,19 +294,69 @@
 ;; with Racket's modules.  Also modified to use simple structs for
 ;; everything, including entities since PLT has applicable struct objects.
 
-(define-values (struct:instance make-instance instance? inst-ref inst-set!)
-  ;; slots: applicable, class, function, slots-vector
-  (make-struct-type 'swindleobj #f 3 0 #f '() (current-inspector)
-                    (lambda (o . args) (apply (instance-proc o) args))))
-(defsubst (instance-class x) (inst-ref x 0))
-(defsubst (instance-proc  x) (inst-ref x 1))
-(defsubst (instance-slots x) (inst-ref x 2))
-(defsubst (set-instance-class! x c) (inst-set! x 0 c))
-(defsubst (set-instance-proc!  x p) (inst-set! x 1 p))
-(defsubst (set-instance-slots! x s) (inst-set! x 2 s))
+;;; TODO: Add support for printing instances in a more meaningful way. 
 
-(defsubst (%instance-ref o f)    (vector-ref (instance-slots o) f))
-(defsubst (%instance-set! o f n) (vector-set! (instance-slots o) f n))
+;;; TODO: Define the following functions as generic functions
+(define (print-object obj port mode)
+  (define type-name (class-name obj))
+  (define the-class (class-of obj))
+  (define the-class-name (and the-class (class-name the-class)))
+  (define supers (class-direct-supers obj))
+  (define super-names (map class-name supers))
+  (fprintf port "#{~a #:supers ~a #:class ~a}"
+	   type-name super-names the-class-name))
+
+(define (object-equal? lhs rhs recursive-equal?)
+  (eq? lhs rhs))
+
+(define (object-hash obj recursive-equal-hash)
+  (equal-hash-code obj))
+
+(define (object-secondary-hash obj recursive-equal-hash)
+  (equal-secondary-hash-code obj))
+
+
+(provide instance?)
+(define-values (struct:instance make-instance instance? inst-ref inst-set!)
+  ;; slots: class, function, slots-vector
+  (make-struct-type 'instance		; name
+		    #f 			; super-type
+		    3 			; init-field-cnt
+		    0 			; auto-field-cnt
+		    #f			; auto-value
+		    (list		; props
+		     (cons (generic->property-descriptor gen:custom-write)
+			   (vector print-object))
+		     (cons (generic->property-descriptor gen:equal+hash)
+			   (vector object-equal? 
+				   object-hash
+				   object-secondary-hash)))
+		    (current-inspector)	; inspector 
+                    (lambda (o kws kw-args . args)	; proc-spec
+		      (keyword-apply (instance-proc o) kws kw-args args))))
+
+(define-syntax-rule (instance-class x)
+  (inst-ref x 0))
+(define-syntax-rule (instance-proc  x)
+  (inst-ref x 1))
+(define-syntax-rule (instance-slots x)
+  (inst-ref x 2))
+
+;;; TODO: We should probably export some of these things in different
+;;; modules, e.g., mop and mop-internals.
+(provide set-instance-proc!) ; dangerous!
+
+(define-syntax-rule (set-instance-class! x c)
+  (inst-set! x 0 c))
+(define-syntax-rule (set-instance-proc! x p)
+  (inst-set! x 1 p))
+(define-syntax-rule (set-instance-slots! x s)
+  (inst-set! x 2 s))
+
+(define-syntax-rule (%instance-ref o f)
+  (vector-ref (instance-slots o) f))
+(define-syntax-rule (%instance-set! o f n)
+  (vector-set! (instance-slots o) f n))
 
 (define (%allocate-instance class nfields)
   (make-instance class
@@ -249,28 +366,58 @@
                  (make-vector nfields ???)))
 
 (define (%allocate-entity class nfields)
-  (letrec ([o (make-instance
-               class
-               (lambda args
-                 (error 'entity
-                        "tried to call an entity before its proc is set"))
-               (make-vector nfields ???))])
-    o))
+  (make-instance class
+		 (lambda args
+		   (error 'entity
+			  "tried to call an entity before its proc is set"))
+		 (make-vector nfields ???)))
+
+;; Basic allocation ends here.
 
 ;; This is used only once as part of bootstrapping the braid.
 (define (set-instance-class-to-self! class)
   (set-instance-class! class class))
 
-(define (change-class! obj new-class . initargs)
-  (let ([new (apply make new-class initargs)]
-        [new-slots (%class-slots new-class)])
-    (dolist [slot (%class-slots (class-of obj))]
-	    ;;; FIXME
-	    (when (and #;(not (eq? #:class (getarg (cdr slot) #:allocation #:instance)))
-		       (assq (car slot) new-slots))
-	      (slot-set! new (car slot) (slot-ref obj (car slot)))))
-    (set-instance-slots! obj (instance-slots new))
-    (set-instance-class! obj new-class)))
+(define object? instance?)
+
+
+;;;; Slots
+;;;; =====
+
+;;; In contrast to the original tiny-clos we define slots as racket
+;;; structures.  The properties of a slot are stored in the
+;;; `slot-properties' hash table, keyed by symbols (not keywords).
+
+(struct slot (name properties))
+
+(define (make-slot-named name)
+  (slot name (make-hasheq)))
+
+(define (slot-property slot key [default #f])
+  (when (keyword? key)
+    (set! key (keyword->symbol key)))
+  (hash-ref (slot-properties slot) key default))
+
+(define (slot-allocation slot)
+  (slot-property slot 'allocation))
+
+;;;; Classes
+;;;; =======
+
+
+(define change-class! 
+  (make-keyword-procedure
+   (lambda (kws kw-args obj new-class)
+     (let ([new (keyword-apply make kws kw-args new-class)]
+	   [new-slots (%class-slots new-class)])
+       (for ([slot (in-list (%class-slots (class-of obj)))])
+	 ;; FIXME: Define a protocol to control which slot allocations
+	 ;; are actually allocated in instances and which ones are not
+	 (when (and (not (eq? 'class (slot-allocation slot)))
+		    (assq (slot-name slot) new-slots))
+	   (slot-set! new (slot-name slot) (slot-ref obj (slot-name slot)))))
+       (set-instance-slots! obj (instance-slots new))
+       (set-instance-class! obj new-class)))))
 
 ;; This might be cute for some ugly hacks but not needed for now.
 ;; Copies the contents of source to target, making it an "alias" object.  This
@@ -280,69 +427,61 @@
 ;;   (set-instance-proc!  target (instance-proc  source))
 ;;   (set-instance-slots! target (instance-slots source)))
 
-(provide set-instance-proc!) ; dangerous!
-
-;; Basic allocation ends here.
-
-(provide instance?)
-(define object? instance?)
-
 (define (class-of x)
   ;; This is an early version that will be modified when built-in types are
   ;; introduced later.
   (if (instance? x) (instance-class x) <top>))
 
 ;;; Now we can get down to business.  First, we initialize the braid.
-;;; For Bootstrapping, we define an early version of MAKE.  It will be changed
-;;; to the real version later on.
+;;; For bootstrapping, we define an early version of `make'.  It will
+;;; be changed to the real version later on.
 (define (make class 
 	  #:direct-supers [dsupers '()]
-	  #:direct-slots [direct-slots '()]
+	  #:direct-slots [dslots '()]
 	  #:name [name '-anonymous-]
 	  #:arity [arity #f]
 	  #:specializers [specializers '()]
 	  #:procedure [procedure #f]
 	  #:qualifier [qualifier 'primary])
   (cond [(or (eq? class <class>) (eq? class <entity-class>))
-         (let* ([new     (%allocate-instance class
-                                             (length the-slots-of-a-class))]
-                [dslots  (map list direct-slots)]
-                [cpl     (let loop ([sups dsupers] [so-far (list new)])
-                           (if (null? sups)
-                             (reverse so-far)
-                             (loop (append (cdr sups)
-                                           (%class-direct-supers (car sups)))
-                                   (if (memq (car sups) so-far)
-                                     so-far
-                                     (cons (car sups) so-far)))))]
-                [slots
-                 (apply append dslots (map %class-direct-slots (cdr cpl)))]
-                [nfields 0]
-                [field-initializers '()]
-                ;; this is a temporary allocator version, kept as the original
-                ;; one in tiny-clos.  the permanent version below is modified.
-                [allocator
-                 (lambda (init)
-                   (let ([f nfields])
-                     (set! nfields (+ nfields 1))
-                     (set! field-initializers (cons init field-initializers))
-                     (mcons (lambda (o)   (%instance-ref  o f))
-                            (lambda (o n) (%instance-set! o f n)))))]
-                [getters-n-setters
-                 (map (lambda (s)
-                        (cons (car s) (allocator unspecified-initializer)))
-                      slots)])
-           (%set-class-direct-supers!      new dsupers)
-           (%set-class-direct-slots!       new dslots)
-           (%set-class-cpl!                new cpl)
-           (%set-class-slots!              new slots)
-           (%set-class-nfields!            new nfields)
-           (%set-class-field-initializers! new (reverse field-initializers))
-           (%set-class-getters-n-setters!  new getters-n-setters)
-           (%set-class-name!               new name)
-           (%set-class-initializers!       new '()) ; no class inits now
-           (%set-class-valid-initargs!     new #f)  ; no initargs now
-           new)]
+         (define new (%allocate-instance class
+					 (length the-slots-of-a-class)))
+	 (define cpl (let loop ([sups dsupers] [so-far (list new)])
+		       (if (null? sups)
+			   (reverse so-far)
+			   (loop (append (cdr sups)
+					 (%class-direct-supers (car sups)))
+				 (if (memq (car sups) so-far)
+				     so-far
+				     (cons (car sups) so-far))))))
+	 (define slots
+	  (apply append dslots (map %class-direct-slots (cdr cpl))))
+	 (define nfields 0)
+	 (define field-initializers '())
+	 ;; this is a temporary allocator version, kept as the original
+	 ;; one in tiny-clos.  the permanent version below is modified.
+	 (define allocator
+	   (lambda (init)
+	     (let ([f nfields])
+	       (set! nfields (+ nfields 1))
+	       (set! field-initializers (cons init field-initializers))
+	       (mcons (lambda (o)   (%instance-ref  o f))
+		      (lambda (o n) (%instance-set! o f n))))))
+	 (define getters-n-setters
+	   (map (lambda (s)
+		  (cons (slot-name s) (allocator unspecified-initializer)))
+		slots))
+	 (%set-class-direct-supers!      new dsupers)
+	 (%set-class-direct-slots!       new dslots)
+	 (%set-class-cpl!                new cpl)
+	 (%set-class-slots!              new slots)
+	 (%set-class-nfields!            new nfields)
+	 (%set-class-field-initializers! new (reverse field-initializers))
+	 (%set-class-getters-n-setters!  new getters-n-setters)
+	 (%set-class-name!               new name)
+	 (%set-class-initializers!       new '()) ; no class inits now
+	 (%set-class-valid-initargs!     new #f)  ; no initargs now
+	 new]
         [(eq? class <generic>)
          (let ([new   (%allocate-entity class (length (%class-slots class)))])
            (%set-generic-methods!     new '())
@@ -363,15 +502,13 @@
 ;;; the new slot access protocol works, with no generic call in line, they can
 ;;; be defined up front like this.  Cool eh?
 
-(define (slot-ref object slot-name)
-  ((lookup-slot-info (class-of object) slot-name mcar) object))
-(defsubst (%slot-ref object slot-name)
-  ((lookup-slot-info (class-of object) slot-name mcar) object))
+(define/macro slot-ref %slot-ref (object slot-name)
+  ((lookup-slot-info (class-of object) slot-name mcar) 
+   object))
 
-(define (slot-set! object slot-name new-value)
-  ((lookup-slot-info (class-of object) slot-name mcdr) object new-value))
-(defsubst (%slot-set! object slot-name new-value)
-  ((lookup-slot-info (class-of object) slot-name mcdr) object new-value))
+(define/macro slot-set! %slot-set! (object slot-name new-value)
+  ((lookup-slot-info (class-of object) slot-name mcdr)
+   object new-value))
 
 (define set-slot-ref! slot-set!)
 
@@ -389,16 +526,13 @@
   (not (eq? ??? (%slot-ref object slot-name))))
 
 (define (lookup-slot-info class slot-name selector)
-  (selector (cdr (or (assq slot-name
-                           ;; no need to ground slot-ref any more! -- see below
-                           ;; (if (eq? class <class>)
-                           ;;   ;;* This grounds out the slot-ref tower
-                           ;;   getters-n-setters-for-class
-                           ;;   (%class-getters-n-setters class))
-                           (%class-getters-n-setters class))
-                     (raise* make-exn:fail:contract
-                             "slot-ref: no slot `~.s' in ~.s"
-                             slot-name class)))))
+  (define getter-n-setter
+    (assq slot-name (%class-getters-n-setters class)))
+  (if getter-n-setter
+      (selector (cdr getter-n-setter))
+      (raise* make-exn:fail:contract
+	      "slot-ref: no slot `~.s' in ~.s"
+	      slot-name class)))
 
 ;;; These are for optimizations - works only for single inheritance!
 (define (%slot-getter class slot-name)
@@ -407,19 +541,21 @@
   (lookup-slot-info class slot-name mcdr))
 
 
+;;; TODO: Change singletons to structs
+
 ;;; Singleton class.  A hash-table is used so it is still possible to compare
 ;;; classes with eq?.
 (define singleton-classes (make-weak-hasheq))
 
 (define (singleton x)
-  (or (hash-ref singleton-classes x false-func)
+  (or (hash-ref singleton-classes x #f)
       (let ([c (list 'singleton x)])
         (hash-set! singleton-classes x c)
         c)))
-(define (singleton? x)
+
+(define/macro singleton? %singleton? (x)
   (and (pair? x) (eq? (car x) 'singleton)))
-(defsubst (%singleton? x)
-  (and (pair? x) (eq? (car x) 'singleton)))
+
 (define singleton-value cadr)
 
 
@@ -438,20 +574,20 @@
               [supers (if proc? (cons <primitive-procedure> supers) supers)]
               [this (parameterize ([*default-object-class* #f])
                       (make (if proc? <procedure-class> <primitive-class>)
-                            '#:name name '#:direct-supers supers))])
+                            #:name name #:direct-supers supers))])
          (hash-set! struct-to-class-table stype this)
          this)))))
 
 (define (class-direct-slots       c) (%slot-ref c 'direct-slots))
 (define (class-direct-supers      c) (%slot-ref c 'direct-supers))
 (define (class-slots              c) (%slot-ref c 'slots))
-(define  (class-nfields            c) (%slot-ref c 'nfields))
-(define  (class-field-initializers c) (%slot-ref c 'field-initializers))
-(define  (class-getters-n-setters  c) (%slot-ref c 'getters-n-setters))
+(define (class-nfields            c) (%slot-ref c 'nfields))
+(define (class-field-initializers c) (%slot-ref c 'field-initializers))
+(define (class-getters-n-setters  c) (%slot-ref c 'getters-n-setters))
 (define (class-cpl                c) (%slot-ref c 'cpl))
 (define (class-name               c) (%slot-ref c 'name))
 (define (class-initializers       c) (%slot-ref c 'initializers))
-(define  (class-valid-initargs     c) (%slot-ref c 'valid-initargs))
+(define (class-valid-initargs     c) (%slot-ref c 'valid-initargs))
 (define (generic-methods          g) (%slot-ref g 'methods))
 (define (generic-arity            g) (%slot-ref g 'arity))
 (define (generic-name             g) (%slot-ref g 'name))
@@ -515,12 +651,13 @@
 (define (%set-generic-app-cache!       g x) (%slot-set! g 'app-cache x))
 (define (%set-generic-singletons-list! g x) (%slot-set! g 'singletons-list x))
 
+
 ;;; The next 7 clusters define the 6 initial classes.  It takes 7 to 6 because
 ;;; the first and fourth both contribute to <class>.
 
 (define the-slots-of-a-class
   '(direct-supers              ; (class ...)
-    direct-slots               ; ((name . options) ...)
+    direct-slots               ; ((slot name properties) ...)
     cpl                        ; (class ...)
     slots                      ; ((name . options) ...)
     nfields                    ; an integer
@@ -529,6 +666,7 @@
     name                       ; a symbol
     initializers               ; (proc ...)
     valid-initargs))           ; (initarg ...) or #f
+
 (define getters-n-setters-for-class ; see lookup-slot-info
   (map (lambda (s)
          (let ([f (position-of s the-slots-of-a-class)])
@@ -538,6 +676,7 @@
 
 (define <class> (%allocate-instance #f (length the-slots-of-a-class)))
 (set-instance-class-to-self! <class>)
+
 
 ;; In the original tiny-clos, this block used to just set the getters-n-setters
 ;; slot of a class to '() since it wasn't used anyway.  In Swindle the MOP
@@ -549,22 +688,34 @@
 ;; slot-ref definition above is fine. So,
 ;;   (%set-class-getters-n-setters! <class> getters-n-setters-for-class)
 ;; translates into this:
-((mcdr (cdr (assq 'getters-n-setters getters-n-setters-for-class)))
+(define bootstrap-getters-n-setters
+  (cdr (assq 'getters-n-setters getters-n-setters-for-class)))
+(define bootstrap-%set-class-getters-n-setters!
+  (mcdr bootstrap-getters-n-setters))
+(define bootstrap-%get-class-getters-n-setters
+  (mcar bootstrap-getters-n-setters))
+
+(bootstrap-%set-class-getters-n-setters!
  <class> getters-n-setters-for-class)
 ;; and now the direct `%class-getters-n-setters' version:
 (set! %class-getters-n-setters
-      ;; and (lookup-slot-info <class> 'getters-n-setters mcar) translates to:
-      (mcar (cdr (assq 'getters-n-setters getters-n-setters-for-class))))
+      bootstrap-%get-class-getters-n-setters)
+
+(define-placeholders  <generic> <method>
+  <primitive-class>
+  <opaque-struct> <struct> <primitive-procedure>
+  *default-object-class*
+  method:compute-apply-method)
 
 (define <top> (make <class>
+		#:name          '<top>
 		#:direct-supers '()
-		#:direct-slots  '()
-		#:name          '<top>))
+		#:direct-slots  '()))
 
 (define <object> (make <class>
+		   #:name          '<object>
 		   #:direct-supers (list <top>)
-		   #:direct-slots  '()
-		   #:name          '<object>))
+		   #:direct-slots  '()))
 
 ;;; This cluster, together with the first cluster above that defines <class>
 ;;; and sets its class, have the effect of:
@@ -574,8 +725,10 @@
 ;;;                   #:name          '<class>))
 (%set-class-direct-supers!      <class> (list <object>))
 (%set-class-cpl!                <class> (list <class> <object> <top>))
-(%set-class-direct-slots!       <class> (map list the-slots-of-a-class))
-(%set-class-slots!              <class> (map list the-slots-of-a-class))
+(%set-class-direct-slots!       <class> (map make-slot-named
+					     the-slots-of-a-class))
+(%set-class-slots!              <class> (map make-slot-named
+					     the-slots-of-a-class))
 (%set-class-nfields!            <class> (length the-slots-of-a-class))
 (%set-class-field-initializers! <class> (map (lambda (s)
                                                unspecified-initializer)
@@ -586,21 +739,22 @@
 
 (define <procedure-class>
   (make <class>
+    #:name          '<procedure-class>
     #:direct-supers (list <class>)
-    #:direct-slots  '()
-    #:name          '<procedure-class>))
+    #:direct-slots  '()))
 
 (define <entity-class>
   (make <class>
+    #:name          '<entity-class>
     #:direct-supers (list <procedure-class>)
-    #:direct-slots  '()
-    #:name          '<entity-class>))
+    #:direct-slots  '()))
 
 (define <function>
   (make <class>
+    #:name          '<function>
     #:direct-supers (list <top>)
-    #:direct-slots  '()
-    #:name          '<function>))
+    #:direct-slots  '()))
+#||
 
 ;;; The two extra slots below (app-cache and singletons-list) are used to
 ;;; optimize generic invocations: app-cache holds an 'equal hash-table that
@@ -627,45 +781,48 @@
 (define <generic>
   (make <entity-class>
     #:direct-supers (list <object> <function>)
-    #:direct-slots  '(methods arity name combination
-			      app-cache singletons-list) ; see above
+    #:direct-slots  (map make-slot-named
+			 '(methods arity name combination
+				   app-cache singletons-list)) ; see above
     #:name          '<generic>))
 
 (define <method>
   (make <entity-class>
     #:direct-supers (list <object> <function>)
-    #:direct-slots  '(specializers procedure qualifier name)
+    #:direct-slots  (map make-slot-named
+			 '(specializers procedure qualifier name))
     #:name          '<method>))
 
 ;; Do this since compute-apply-method relies on them not changing, as well as a
 ;; zillion other places.  A method should be very similar to a lambda.
-(dolist [slot '(specializers procedure qualifier)]
+(for ([slot (in-list '(specializers procedure qualifier))])
   (make-setter-locked! (lookup-slot-info <method> slot values) #t
-    (lambda ()
-      (raise* make-exn:fail:contract
-              "slot-set!: slot `~.s' in <method> is locked" slot))))
+		       (lambda ()
+			 (raise* make-exn:fail:contract
+				 "slot-set!: slot `~.s' in <method> is locked" slot))))
 
-(define (make-class direct-supers direct-slots)
+(define (make-class [name '-anonymous-]
+		    [direct-supers (list <object>)]
+		    [direct-slots '()])
   (make <class>
+    #:name name
     #:direct-supers direct-supers
     #:direct-slots  direct-slots))
 
-(define (make-generic-function . name/arity)
-  (cond
-   [(null? name/arity) (make <generic>)]
-   [(null? (cdr name/arity))
-    (let ([n/a (car name/arity)])
-      (if (integer? n/a)
-        (make <generic> #:arity n/a) (make <generic> #:name n/a)))]
-   [else (make <generic> #:name (car name/arity) #:arity (cadr name/arity))]))
+(define (make-generic-function [name '-anonymous-] [arity #f])
+  (make <generic> #:name name #:arity arity))
 
-(define (make-method specializers procedure)
+(define (make-method #:name [name '-anonymous-] specializers procedure)
   (make <method>
+    #:name name
     #:specializers specializers
     #:procedure    procedure))
 
 (define no-next-method       (make-generic-function 'no-next-method))
 (define no-applicable-method (make-generic-function 'no-applicable-method))
+
+;;; TODO: How should we handle keyword arguments in the following
+;;; methods?
 
 ;;; Add possibility of generic-independent method application - this is the
 ;;; instance-proc of methods, which is activated when you apply the object (in
@@ -676,7 +833,8 @@
 (define (method:compute-apply-method call-next-method method)
   (let* ([specializers (%method-specializers method)]
          [*no-next-method* ; see the *no-next-method* trick below
-          (lambda args (apply no-next-method #f method args))]
+          (lambda (kws kw-args . args)
+	    (keyword-apply no-next-method kws kw-args #f method args))]
          [proc     (%method-procedure method)]
          [arity    (method-arity method)]
          [exact?   (integer? arity)]
@@ -685,9 +843,10 @@
       (error 'compute-apply-method
              "got ~e specializers for ~s - too much for procedure arity ~a"
              (length specializers) (%method-name method) required))
-    (lambda args
+    (lambda (kws kw-args . args)
       (cond [(if exact?
-               (not (= (length args) required)) (< (length args) required))
+               (not (= (length args) required))
+	       (< (length args) required))
              (raise* make-exn:fail:contract:arity
                      "method ~a: expects ~a~e argument~a, given ~e~a"
                      (%method-name method)
@@ -702,7 +861,7 @@
                          "method ~a: expects argument of type ~a; given ~e"
                          (%method-name method) (%class-name (car specs))
                          (car args))))]
-            [else (apply proc *no-next-method* args)]))))
+            [else (keyword-apply proc kws kw-args *no-next-method* args)]))))
 
 (define allocate-instance
   (make-generic-function 'allocate-instance))
@@ -831,7 +990,7 @@
       ;; cache, or generates one and store it if there is no entry, or the
       ;; cache was reset.  Finally, it is applied to the arguments as usual.
       ;; NOTE: This code is delicate! Handle with extreme care!
-      (lambda args
+      (lambda (kws kw-args . args)
         (let ([app-cache (%generic-app-cache generic)]
               [arity     (%generic-arity generic)]
               [keys      (get-keys args (%generic-singletons-list generic))]
@@ -846,7 +1005,8 @@
             (let ([c (if ground?
                        (let ([m (%method-procedure
                                  (last (%generic-methods generic)))])
-                         (lambda args (apply m #f args)))
+                         (lambda (kws kw-args . args)
+			   (keyword-apply m kws kw-args #f args)))
                        (compute-apply-methods
                         generic (compute-methods generic args)))])
               (hash-set! (cdr app-cache) keys c)
@@ -867,6 +1027,7 @@
             (set! app-cache (cons *generic-app-cache-tag*
                                   (make-weak-hash)))
             (%set-generic-app-cache! generic app-cache))
+	  ;; TODO: keyword-apply?
           (apply (hash-ref (cdr app-cache) keys compute-callable)
 		 args))))))
 
@@ -917,6 +1078,7 @@
                           (more-specific? c1 c2 (car args))))]))))))
 
 (add-method compute-apply-methods
+	    ;; TODO: Replace apply with keyword-apply where appropriate
   (make-method (list <generic>)
     (lambda (call-next-method generic methods)
       (let ([primaries '()] [arounds '()] [befores '()] [afters '()]
@@ -961,10 +1123,11 @@
         ;; first sort by qualifier and pull out method-procedures
         (let loop ([ms methods])
           (unless (null? ms)
-            (letsubst ([(push! p)
-                        (set! p (cons (cons (car ms)
-                                            (%method-procedure (car ms)))
-                                      p))])
+            (let-syntax ([push! (syntax-rules ()
+				  [(_  p)
+				   (set! p (cons (cons (car ms)
+						       (%method-procedure (car ms)))
+						 p))])])
               (case (%method-qualifier (car ms))
                 [(#:primary) (push! primaries)]
                 [(#:around)  (push! arounds)]
@@ -999,18 +1162,24 @@
   (lambda (generic)
     (lambda (tail dummy-args)
       (let ([tail (if process-methods (process-methods tail) tail)])
-        (lambda args
+        (lambda (kws kw-args . args)
           (let loop ([res init] [tail tail])
             ;; see *no-next-method* trick above
             (let ([*no-next-method*
-                   (lambda args (apply no-next-method generic (caar tail) args))])
+                   (lambda (kws kw-args . args)
+		     (keyword-apply no-next-method kws kw-args
+				    generic (caar tail) args))])
               (if (null? tail)
                 (if process-result (process-result res) res)
                 (if control
                   (control loop res
-                           (lambda () (apply (cdar tail) *no-next-method* args))
+                           (lambda ()
+			     (keyword-apply (cdar tail) kws kw-args
+					    *no-next-method* args))
                            (cdr tail))
-                  (loop (combine (apply (cdar tail) *no-next-method* args) res)
+                  (loop (combine
+			 (keyword-apply (cdar tail) kws kw-args
+					*no-next-method* args) res)
                         (cdr tail)))))))))))
 
 (define generic-+-combination
@@ -1040,7 +1209,7 @@
 
 
 ;; optimized helper
-(defsubst (%struct->class c)
+(define-syntax-rule (%struct->class c)
   (if (struct-type? c) (struct-type->class c) c))
 
 (define (subclass? c1 c2)
@@ -1058,8 +1227,8 @@
         (eq? (singleton-value c) x)
         (memq (%struct->class c) (%class-cpl (%struct->class (class-of x)))))))
 
-(define (class? x) (instance-of? x <class>))
-(defsubst (%class? x) (instance-of? x <class>))
+(define/macro class? %class? (x)
+  (instance-of? x <class>))
 
 (define (specializer? x) (or (class? x) (%singleton? x) (struct-type? x)))
 
@@ -1070,12 +1239,14 @@
     (let ([cc1 (memq (%struct->class c1) (%class-cpl (class-of arg)))])
       (and cc1 (memq (%struct->class c2) (cdr cc1))))))
 
+;;; TODO: Keywords
 (add-method initialize
   (make-method (list <top>)
     (lambda (call-next-method object initargs)
       (error 'initialize "can't initialize an instance of ~e"
              (class-of object)))))
 
+;;; TODO: Keywords
 (add-method initialize
   (make-method (list <object>)
     (lambda (call-next-method object initargs)
@@ -1088,6 +1259,7 @@
             (%instance-set! object n (apply (car inits) initargs))
             (loop (+ n 1) (cdr inits))))))))
 
+;;; TODO: Keywords
 (add-method initialize
   (make-method (list <class>)
     (lambda (call-next-method class
@@ -1104,7 +1276,7 @@
           [(not default) supers] ; check disabled
           [(or (not supers) (null? supers)) (list default)]
           [(not (list? supers)) (error 'class "bad superclasses: ~e" supers)]
-          [else (let ([c (find-if
+          [else (let ([c (find
                           (lambda (c)
                             (not (and (%class? c) (subclass? c default))))
                           supers)])
@@ -1149,7 +1321,7 @@
         (%set-class-getters-n-setters! class getters-n-setters))
       (%set-class-initializers!
        class (reverse
-              (mappend
+              (append-map
                (lambda (c)
                  (if (instance-of? c <class>) (%class-initializers c) '()))
                (cdr (%class-cpl class)))))
@@ -1158,10 +1330,11 @@
        ;;; FIXME
        #f #;
        (getarg initargs #:valid-initargs
-	       (thunk (mappend (lambda (slot)
+	       (thunk (append-map (lambda (slot)
 				 (getargs (cdr slot) #:initarg))
 			       (%class-slots class))))))))
 
+;;; TODO: Keywords
 (add-method initialize
   (make-method (list <generic>)
     (lambda (call-next-method generic initargs)
@@ -1179,6 +1352,7 @@
                                        "~s: no methods added yet"
                                        (%generic-name generic)))))))
 
+;;; TODO: Keywords
 (add-method initialize
   (make-method (list <method>)
     (lambda (call-next-method method initargs)
@@ -1269,6 +1443,7 @@
           (define (init-slot . args)
             (let ([result (l-getarg args initargs)])
               (when (eq? result nothing)
+		;;; TODO: keyword-apply?
                 (set! result (apply init args)))
               (when (and type (not (eq? result ???))
                          (not (instance-of? result type)))
@@ -1355,19 +1530,21 @@
   (make-method (list <generic> <method>)
     (lambda (call-next-method generic method . args)
       (raise* make-exn:fail:contract
-              (concat "~s: no applicable next method to call"
-                      (case (%method-qualifier method)
-                        [(#:before) " in a `before' method"]
-                        [(#:after)  " in an `after' method"]
-                        [else ""])
-                      " with arguments: ~e")
+              (string-append
+	       "~s: no applicable next method to call"
+	       (case (%method-qualifier method)
+		 [(#:before) " in a `before' method"]
+		 [(#:after)  " in an `after' method"]
+		 [else ""])
+	       " with arguments: ~e")
               (%generic-name generic) args))))
 (add-method no-next-method
   (make-method (list (singleton #f) <method>)
     (lambda (call-next-method generic method . args)
       (raise* make-exn:fail:contract
-              (concat "~s: no applicable next method in a direct method call"
-                      " with arguments: ~e")
+              (string-append
+	       "~s: no applicable next method in a direct method call"
+	       " with arguments: ~e")
               (%method-name method) args))))
 
 (add-method no-applicable-method
@@ -1376,6 +1553,7 @@
       (raise* make-exn:fail:contract
               "~s: no applicable primary methods for arguments ~e, of types ~e"
               (%generic-name generic) args (map class-of args)))))
+
 
 ;;; ---------------------------------------------------------------------------
 ;;; Customization variables
@@ -1416,10 +1594,11 @@
 
 (let ([m (make-method (list <class>)
            (make-keyword-procedure
-	    (lambda (call-next-method class . initargs)
-	      (let ([instance (allocate-instance class initargs)])
-		(when (*make-safely*) (check-initargs class initargs))
-		(initialize instance initargs)
+	    (lambda (kws kw-args call-next-method class)
+	      (let ([instance (keyword-apply allocate-instance kws kw-args class)])
+		;; FIXME
+		#;(when (*make-safely*) (check-initargs class initargs))
+		(keyword-apply kws kw-args initialize instance)
 		instance))))]
       [g (make-generic-function 'make)])
   (add-method g m)
@@ -1427,7 +1606,8 @@
 
 ;; The clean concept behind this is due to Joe Marshall.
 
-(defsubst* (rec-make (name class arg ...) ...)
+(provide rec-make)
+(define-syntax-rule (rec-make (name class arg ...) ...)
   (let ([name (allocate-instance class (list arg ...))] ...)
     (when (*make-safely*) (check-initargs class (list arg ...)) ...)
     (initialize name (list arg ...)) ...
@@ -1555,12 +1735,18 @@
   (make <class> #:direct-supers (list <top>)
                 #:direct-slots  '()
                 #:name          '<builtin>))
-(defsubst (defprimclass primclass) (defprimclass primclass <builtin>)
-          (_ primclass supers ...) (define primclass
-                                     (make <primitive-class>
-                                           #:name          'primclass
-                                           #:direct-supers (list supers ...)
-                                           #:direct-slots  '())))
+
+(define-syntax defprimclass
+  (syntax-rules ()
+    [(_ primclass)
+     (defprimclass primclass <builtin>)]
+    [(_ primclass supers ...)
+     (define primclass
+       (make <primitive-class>
+	 #:name          'primclass
+	 #:direct-supers (list supers ...)
+	 #:direct-slots  '()))]))
+
 (defprimclass <sequence>)
 (defprimclass <mutable>)
 (defprimclass <immutable>)
@@ -1730,7 +1916,6 @@
               [(compiled-expression? x) <compiled-expression>]
               [else <unknown-primitive>])))
 
-;;; ---------------------------------------------------------------------------
 ;;; Some useful predicates.
 
 (define (builtin?  x) (instance-of? x <builtin>))
@@ -1738,6 +1923,4 @@
 (define (generic?  x) (instance-of? x <generic>))
 (define (method?   x) (instance-of? x <method>))
 
-;;; ---------------------------------------------------------------------------
 ||#
-
