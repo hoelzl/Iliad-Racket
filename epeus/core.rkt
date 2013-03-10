@@ -271,6 +271,27 @@
           (loop (hash-set result (keyword->symbol keyword) value)
                 new-args)))))
 
+(define-syntax-rule (make-keyword-procedure-0 proc)
+  (procedure-reduce-keyword-arity
+   (make-keyword-procedure proc)
+   (arity-at-least 0)
+   '()
+   #f))
+
+(define-syntax-rule (make-keyword-procedure-1 proc)
+  (procedure-reduce-keyword-arity
+   (make-keyword-procedure proc)
+   (arity-at-least 1)
+   '()
+   #f))
+
+(define-syntax-rule (make-keyword-procedure-n n proc)
+  (procedure-reduce-keyword-arity
+   (make-keyword-procedure proc)
+   (arity-at-least n)
+   '()
+   #f))
+
 ;;; Utilities for Generics
 ;;; ----------------------
 
@@ -376,7 +397,7 @@
 
 (define ??? (letrec ([x x]) x)) ; this is Racket's #<undefined> value
 (define unspecified-initializer
-  (make-keyword-procedure
+  (make-keyword-procedure-0
    (lambda (kws kw-args . args)
      ???)))
 (define false-func (lambda args #f))
@@ -416,6 +437,10 @@
     (+ (recursive-equal-hash (instance-class obj))
        (recursive-equal-hash (instance-slots obj))))
 
+(define %the-instance-proc
+  (make-keyword-procedure-1
+   (lambda (kws kw-args o . args)
+     (keyword-apply (instance-proc o) kws kw-args args))))
 
 (provide instance?)
 (define-values (struct:instance make-instance instance? inst-ref inst-set!)
@@ -436,10 +461,7 @@
 		     ;; property, not as direct (8th) argument to
 		     ;; `make-struct-type', otherwise keyword
 		     ;; arguments are not recognized.
-		     (cons prop:procedure
-			   (make-keyword-procedure
-			    (lambda (kws kw-args o . args)
-			      (keyword-apply (instance-proc o) kws kw-args args)))))
+		     (cons prop:procedure %the-instance-proc))
 		    (current-inspector)))
 
 (define-syntax-rule (instance-class x)
@@ -513,24 +535,45 @@
   (define initarg (slot-property slot 'initarg))
   (if initarg (list initarg) null))
 
+(define (merge-slots slots)
+  (unless (pair? slots)
+    (error 'merge-slots "argument must be a list of slots"))
+  (when (null? slots)
+    (error 'merge-slots "list of slots cannot be empty"))
+  (define first-slot (first slots))
+  (define other-slots (rest slots))
+  (define name (slot-name first-slot))
+  (unless (andmap (lambda (s)
+                    (eq? (slot-name s) name))
+                  other-slots)
+    (error 'merge-slots "cannot merge different slots"))
+  (define properties (slot-properties first-slot))
+  (for ([other (in-list other-slots)])
+    (for ([(property value) (in-hash (slot-properties other))])
+      ;; TODO: Should probably call a generic `merge-properties' here
+      ;; instead of overwriting the old value.
+      (set! properties (hash-set properties property value))))
+  (slot name properties))
 
 ;;;; Classes
 ;;;; =======
 
 
-(define change-class! 
-  (make-keyword-procedure
-   (lambda (kws kw-args obj new-class)
-     (let ([new (keyword-apply make kws kw-args new-class)]
-	   [new-slots (%class-slots new-class)])
-       (for ([slot (in-list (%class-slots (class-of obj)))])
-	 ;; FIXME: Define a protocol to control which slot allocations
-	 ;; are actually allocated in instances and which ones are not
-	 (when (and (not (eq? 'class (slot-allocation slot)))
-		    (assq (slot-name slot) new-slots))
-	   (slot-set! new (slot-name slot) (slot-ref obj (slot-name slot)))))
-       (set-instance-slots! obj (instance-slots new))
-       (set-instance-class! obj new-class)))))
+(define change-class!
+  (procedure-reduce-keyword-arity
+   (make-keyword-procedure
+    (lambda (kws kw-args obj new-class)
+      (let ([new (keyword-apply make kws kw-args new-class)]
+            [new-slots (%class-slots new-class)])
+        (for ([slot (in-list (%class-slots (class-of obj)))])
+          ;; FIXME: Define a protocol to control which slot allocations
+          ;; are actually allocated in instances and which ones are not
+          (when (and (not (eq? 'class (slot-allocation slot)))
+                     (assq (slot-name slot) new-slots))
+            (slot-set! new (slot-name slot) (slot-ref obj (slot-name slot)))))
+        (set-instance-slots! obj (instance-slots new))
+        (set-instance-class! obj new-class))))
+   2 '() #f))
 
 ;; This might be cute for some ugly hacks but not needed for now.
 ;; Copies the contents of source to target, making it an "alias" object.  This
@@ -965,7 +1008,7 @@
   ;; (printf "method:compute-apply-method\n")
   (let* ([specializers (%method-specializers method)]
          [*no-next-method* ; see the *no-next-method* trick below
-          (make-keyword-procedure
+          (make-keyword-procedure-0
            (lambda (kws kw-args . args)
              (apply no-next-method #f method kws kw-args args)))]
          [proc     (%method-procedure method)]
@@ -977,7 +1020,7 @@
              "got ~e specializers for ~s - too many for procedure arity ~a"
              (length specializers) (%method-name method) required))
     ;;; TODO: Check keyword args
-    (make-keyword-procedure
+    (make-keyword-procedure-0
      (lambda (kws kw-args . args)
        ;; (printf "applying method ~a\n" (method-name method))
        (cond [(if exact?
@@ -1112,7 +1155,7 @@
  (make-method #:name "{compute-apply-generic <generic>}"
   (list <generic>)
   (lambda (call-next-method generic)
-    (printf "compute-apply-generic ~a\n" (generic-name generic))
+    ;; (printf "compute-apply-generic ~a\n" (generic-name generic))
     ;; This function converts the list of arguments to a list of keys to look
     ;; for in the cache - use the argument's class except when there is a
     ;; corresponding singleton with the same value at the same position.
@@ -1132,7 +1175,7 @@
     ;; cache, or generates one and store it if there is no entry, or the
     ;; cache was reset.  Finally, it is applied to the arguments as usual.
     ;; NOTE: This code is delicate! Handle with extreme care!
-    (make-keyword-procedure
+    (make-keyword-procedure-0
      (lambda (kws kw-args . args)
        ;; (printf "applying generic ~a\n" (generic-name generic))
        (let ([app-cache (%generic-app-cache generic)]
@@ -1152,7 +1195,7 @@
            (let ([c (if ground?
                         (let ([m (%method-procedure
                                   (last (%generic-methods generic)))])
-                          (make-keyword-procedure
+                          (make-keyword-procedure-0
                            (lambda (kws kw-args . args)
                              (keyword-apply m kws kw-args #f args))))
                         (compute-apply-methods
@@ -1275,7 +1318,7 @@
 		;; tail is never null: (null? (cdr tail)) below, and the fact
 		;; that this function is applied on the primaries which are
 		;; never null
-		(make-keyword-procedure
+		(make-keyword-procedure-0
 		 (lambda (new-kws new-kw-args . new-args)
 		   (let-args ([kws new-kws]
 			      [kw-args new-kw-args]
@@ -1283,7 +1326,7 @@
 		     (keyword-apply
 		      (cdar tail) kws kw-args
 		      (if (null? (cdr tail))
-                          (make-keyword-procedure
+                          (make-keyword-procedure-0
                            (lambda (kws kw-args . args)
                              (apply no-next-method generic (caar tail)
                                     kws kw-args args)))
@@ -1292,14 +1335,14 @@
 
 	(define ((apply-before/after-method kws kw-args args) method)
           (keyword-apply (cdr method) kws kw-args
-                         (make-keyword-procedure
+                         (make-keyword-procedure-0
                           (lambda (kws kw-args . args)
                             (apply no-next-method generic (car method)
                                    kws kw-args args)))
                          args))
 
 	(define (call-before-primary-after kws kw-args args)
-	  (make-keyword-procedure
+	  (make-keyword-procedure-0
 	   (lambda (new-kws new-kw-args . new-args)
 	     ;; could supply newargs below, but change before calling befores
 	     (let-args ([kws new-kws]
@@ -1312,7 +1355,7 @@
         (define (one-around-step tail kws kw-args args)
           (if (null? tail)
               (call-before-primary-after kws kw-args args)
-              (make-keyword-procedure
+              (make-keyword-procedure-0
                (lambda (new-kws new-kw-args . new-args)
                  (let-args ([kws new-kws]
                             [kw-args new-kw-args]
@@ -1361,12 +1404,12 @@
   (lambda (generic)
     (lambda (tail kws kw-args dummy-args)
       (let ([tail (if process-methods (process-methods tail) tail)])
-        (make-keyword-procedure
+        (make-keyword-procedure-0
          (lambda (kws kw-args . args)
            (let loop ([res init] [tail tail])
              ;; see *no-next-method* trick above
              (let ([*no-next-method*
-                    (make-keyword-procedure
+                    (make-keyword-procedure-0
                      (lambda (kws kw-args . args)
                        (apply no-next-method generic (caar tail)
                               kws kw-args args)))])
@@ -1448,28 +1491,32 @@
 (add-method initialize
   (make-method #:name "{initialize <top>}"
     (list <top>)
-    (make-keyword-procedure
-     (lambda (kws kw-args call-next-method object)
-       (printf "initialize: <top>\n")
-       (error 'initialize "can't initialize an instance of ~e"
-              (class-of object))))))
+    (procedure-reduce-keyword-arity
+     (make-keyword-procedure
+      (lambda (kws kw-args call-next-method object)
+        ;; (printf "initialize: <top>\n")
+        (error 'initialize "can't initialize an instance of ~e"
+               (class-of object))))
+     2 '() #f)))
 
 (add-method initialize
   (make-method #:name "{initialize <object>}"
     (list <object>)
-    (make-keyword-procedure
-     (lambda (kws kw-args call-next-method object)
-       (printf "initialize: <object>\n")
-       (let* ([class (class-of object)]
-              [field-initializers (%class-field-initializers class)])
-         ;; TODO: Define the initializers so that they can be
-         ;; keyword-applied.
-         (for-each (lambda (init) (keyword-apply kws kw-args init '()))
-                   (%class-initializers class))
-         (let loop ([n 0] [inits field-initializers])
-           (when (pair? inits)
-             (%instance-set! object n (keyword-apply (car inits) kws kw-args '()))
-             (loop (+ n 1) (cdr inits)))))))))
+    (procedure-reduce-keyword-arity
+     (make-keyword-procedure
+      (lambda (kws kw-args call-next-method object)
+        ;; (printf "initialize: <object>\n")
+        (let* ([class (class-of object)]
+               [field-initializers (%class-field-initializers class)])
+          ;; TODO: Define the initializers so that they can be
+          ;; keyword-applied.
+          (for-each (lambda (init) (keyword-apply kws kw-args init '()))
+                    (%class-initializers class))
+          (let loop ([n 0] [inits field-initializers])
+            (when (pair? inits)
+              (%instance-set! object n (keyword-apply (car inits) kws kw-args '()))
+              (loop (+ n 1) (cdr inits)))))))
+     2 '() #f)))
 
 (add-method initialize
   (make-method  #:name "{initialize <class>}"
@@ -1480,7 +1527,7 @@
 			      #:autoinitargs [autoinitargs #f]
 			      #:direct-slots [dslots '()]
                               #:valid-initargs [valid-initargs '()])
-      (printf "initialize: <class>\n")
+      ;; (printf "initialize: <class>\n")
       (call-next-method)
       (%set-class-direct-supers!
        class
@@ -1556,47 +1603,46 @@
     (lambda (#:arity [arity #f] #:name [name '-anonymous-]
              #:combination [combination #f]
              call-next-method generic)
-      (printf "initialize <generic> ~a\n" name)
+      ;; (printf "initialize <generic> ~a\n" name)
       (call-next-method)
       (%set-generic-methods! generic '())
       (%set-generic-arity!   generic arity)
       (%set-generic-name!    generic name)
       (%set-generic-combination! generic combination)
       (set-instance-proc!    generic
-			     (make-keyword-procedure
+			     (make-keyword-procedure-0
 			      (lambda (kws ks-args . args)
 				(raise* make-exn:fail:contract
 					"~s: no methods added yet"
 					(%generic-name generic))))))))
 
-(define-placeholders  <primitive-class> <primitive-procedure>
-  <opaque-struct> <struct>)
-#||
-;;; TODO: Keywords
 (add-method initialize
-  (make-method (list <method>)
-    (lambda (call-next-method method initargs)
+  (make-method #:name "{initialize <generic>}"
+    (list <method>)
+    (lambda (#:specializers [specializers '()]
+             #:procedure procedure
+             #:qualifier [qualifier 'primary]
+             #:name [name '-anonymous-]
+             call-next-method method)
       (call-next-method)
       (%set-method-specializers! method
                                  (map (lambda (c) (%struct->class c))
                                       '() #; (getarg initargs #:specializers)
 				      ))
-      (%set-method-procedure!    method #f #;(getarg initargs #:procedure)
-				 )
-      (%set-method-qualifier!    method (or #;(getarg initargs #:qualifier)
-                                            ':primary))
-      (%set-method-name!         method (or #;(getarg initargs #:name)
-                                            '-anonymous-))
+      (%set-method-procedure!    method procedure)
+      (%set-method-qualifier!    method qualifier)
+      (%set-method-name!         method name)
       (set-instance-proc!        method (compute-apply-method method)))))
+
 
 (add-method allocate-instance
   (make-method (list <class>)
-    (lambda (call-next-method class initargs)
+    (lambda (call-next-method class)
       (%allocate-instance class (length (%class-field-initializers class))))))
 
 (add-method allocate-instance
   (make-method (list <entity-class>)
-    (lambda (call-next-method class initargs)
+    (lambda (call-next-method class)
       (%allocate-entity class (length (%class-field-initializers class))))))
 
 (add-method compute-cpl
@@ -1607,34 +1653,27 @@
 (add-method compute-slots
   (make-method (list <class>)
     (lambda (call-next-method class)
-      (let ([all-slots   (map %class-direct-slots (%class-cpl class))]
-            [final-slots #f])
-        (let collect ([to-process (apply append all-slots)]
-                      [result '()])
-          (if (null? to-process)
-            (set! final-slots result)
-            (let* ([name   (caar to-process)]
-                   [others '()]
-                   [remaining-to-process
-                    (filter (lambda (o)
-                              (if (eq? (car o) name)
-                                (begin (set! others (cons (cdr o) others)) #f)
-                                #t))
-                            to-process)])
+      ;; TODO: Check that this simplified implementation is still correct.
+      
+      ;; Sort the slots by order of appearance in cpl, makes them stay in the
+      ;; same index, allowing optimizations for single-inheritance
+      (define all-slots (append-map %class-direct-slots
+                                    (reverse (%class-cpl class))))
+      (let collect ([to-process all-slots]
+                    [result '()])
+        (if (null? to-process)
+            (reverse result)
+            (let*-values ([(name) (slot-name (first to-process))]
+                          [(current-slots remaining-to-process)
+                           (partition (lambda (s) (eq? (slot-name s) name))
+                                      to-process)])
               (collect remaining-to-process
-                       (cons (cons name (apply append (reverse others)))
-                             result)))))
-        ;; Sort the slots by order of appearance in cpl, makes them stay in the
-        ;; same index, allowing optimizations for single-inheritance
-        (let collect ([to-process (apply append (reverse all-slots))]
-                      [result '()])
-          (cond [(null? to-process) (reverse result)]
-                [(assq (caar to-process) result)
-                 (collect (cdr to-process) result)]
-                [else (collect (cdr to-process)
-                               (cons (assq (caar to-process) final-slots)
-                                     result))]))))))
+                       (cons (merge-slots current-slots)
+                             result))))))))
 
+(define-placeholders  <primitive-class> <primitive-procedure>
+  <opaque-struct> <struct>)
+#||
 (add-method compute-getter-and-setter
   (make-method (list <class>)
     (letrec ([nothing "nothing"]
@@ -1815,13 +1854,15 @@
 ;;; create the generic function and the method instances, then change make.
 
 (let ([m (make-method (list <class>)
-           (make-keyword-procedure
-	    (lambda (kws kw-args call-next-method class)
-	      (let ([instance (keyword-apply allocate-instance kws kw-args class)])
-		;; FIXME
-		#;(when (*make-safely*) (check-initargs class initargs))
-		(keyword-apply kws kw-args initialize instance)
-		instance))))]
+           (procedure-reduce-keyword-arity
+            (make-keyword-procedure
+             (lambda (kws kw-args call-next-method class)
+               (let ([instance (keyword-apply allocate-instance kws kw-args class)])
+                 ;; FIXME
+                 #;(when (*make-safely*) (check-initargs class initargs))
+                 (keyword-apply kws kw-args initialize instance)
+                 instance)))
+            2 '() #f))]
       [g (make-generic-function 'make)])
   (add-method g m)
   (set! make g))

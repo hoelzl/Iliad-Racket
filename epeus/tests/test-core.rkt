@@ -2,14 +2,14 @@
 
 ;;; Tests for the tiny-clos module.
 
-(require "../tiny-clos.rkt")
-(require (submod "../tiny-clos.rkt" test-exports))
+(require "../core.rkt")
+(require (submod "../core.rkt" test-exports))
 (require rackunit)
 (require rackunit/text-ui)
 
-(provide tiny-clos-suite)
+(provide epeus-core-suite)
 
-(define-test-suite tiny-clos-suite
+(define-test-suite epeus-core-suite
   (test-case
    "merge-sorted-keyword-lists 1"
    (let-values ([(keys vals)
