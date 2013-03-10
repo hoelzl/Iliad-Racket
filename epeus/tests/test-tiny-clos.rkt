@@ -19,7 +19,7 @@
      (check-equal? vals '(a1 b2 c1 d2))))
 
   (test-case
-   "merge-sorted-keyword-lists 1"
+   "merge-sorted-keyword-lists 2"
    (let-values ([(keys vals)
 		 (merge-sorted-keyword-lists '(#:b #:d #:e) '(b1 d1 e1)
 					     '(#:a #:c) '(a2 c2))])

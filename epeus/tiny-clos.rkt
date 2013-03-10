@@ -28,6 +28,10 @@
 
 (require racket/performance-hint)
 (require (only-in srfi/1 find every append-reverse))
+;;; For convenience; maybe import only required binding later
+;;; (e.g., xor)
+(require (for-syntax racket))
+(require (for-syntax syntax/parse))
 
 
 ;;; Documentation from the original file:
@@ -122,7 +126,7 @@
 
 (define-syntax-rule (define-placeholder name)
   (define (name . args)
-    (error "Not yet implemented")))
+    (error 'define-placeholder "Not yet implemented")))
 
 (define-syntax-rule (define-placeholders name ...)
   (begin
@@ -221,7 +225,6 @@
   (syntax-case stx ()
     [(_ id) (car (syntax-local-value #'id))]))
 
-
 ;;;; Topological Sort and Utilities
 ;;;; ------------------------------
 
@@ -245,9 +248,9 @@
 	(let ([can-go-in-now
 	       (filter (lambda (x)
 			 (every (lambda (constraint)
-				   (or (not (eq? (second constraint) x))
-				       (memq (first constraint) result)))
-				 constraints))
+				  (or (not (eq? (second constraint) x))
+				      (memq (first constraint) result)))
+				constraints))
 		       elements)])
 	  (if (null? can-go-in-now)
 	      (error 'top-sort "invalid constraints")
@@ -343,13 +346,15 @@
 		  type-name the-class-name)]))
 
 (define (object-equal? lhs rhs recursive-equal?)
-  (eq? lhs rhs))
+  (equal?/recur lhs rhs recursive-equal?))
 
 (define (object-hash obj recursive-equal-hash)
-  (equal-hash-code obj))
+  (+ (recursive-equal-hash (instance-class obj))
+     (recursive-equal-hash (instance-slots obj))))
 
 (define (object-secondary-hash obj recursive-equal-hash)
-  (equal-secondary-hash-code obj))
+    (+ (recursive-equal-hash (instance-class obj))
+       (recursive-equal-hash (instance-slots obj))))
 
 
 (provide instance?)
@@ -497,7 +502,7 @@
 				     so-far
 				     (cons (car sups) so-far))))))
 	 (define slots
-	  (apply append dslots (map %class-direct-slots (cdr cpl))))
+	   (apply append dslots (map %class-direct-slots (cdr cpl))))
 	 (define nfields 0)
 	 (define field-initializers '())
 	 ;; this is a temporary allocator version, kept as the original
@@ -559,11 +564,11 @@
   (let ([getter (mcar g+s)]
 	[setter (mcdr g+s)])
     (set-mcdr! g+s
-      (lambda (o n)
-        (cond [(and (pair? n) (eq? key (car n)) (not (eq? key #t)))
-               (setter o (cdr n))]
-              [(eq? ??? (getter o)) (setter o n)]
-              [else (error)])))))
+	       (lambda (o n)
+		 (cond [(and (pair? n) (eq? key (car n)) (not (eq? key #t)))
+			(setter o (cdr n))]
+		       [(eq? ??? (getter o)) (setter o n)]
+		       [else (error)])))))
 
 (define (slot-bound? object slot-name)
   (not (eq? ??? (%slot-ref object slot-name))))
@@ -607,19 +612,19 @@
   (hash-ref
    struct-to-class-table stype
    (thunk
-     (let-values ([(name init-field-k auto-field-k accessor mutator
-                    immutable-k-list super skipped?)
-                   (struct-type-info stype)])
-       (let* ([supers (list (cond [super (struct-type->class super)]
-                                  [skipped? <opaque-struct>]
-                                  [else <struct>]))]
-              [proc? (procedure-struct-type? stype)]
-              [supers (if proc? (cons <primitive-procedure> supers) supers)]
-              [this (parameterize ([*default-object-class* #f])
-                      (make (if proc? <procedure-class> <primitive-class>)
-                            #:name name #:direct-supers supers))])
-         (hash-set! struct-to-class-table stype this)
-         this)))))
+    (let-values ([(name init-field-k auto-field-k accessor mutator
+			immutable-k-list super skipped?)
+		  (struct-type-info stype)])
+      (let* ([supers (list (cond [super (struct-type->class super)]
+				 [skipped? <opaque-struct>]
+				 [else <struct>]))]
+	     [proc? (procedure-struct-type? stype)]
+	     [supers (if proc? (cons <primitive-procedure> supers) supers)]
+	     [this (parameterize ([*default-object-class* #f])
+		     (make (if proc? <procedure-class> <primitive-class>)
+		       #:name name #:direct-supers supers))])
+	(hash-set! struct-to-class-table stype this)
+	this)))))
 
 (define (class-direct-slots       c) (%slot-ref c 'direct-slots))
 (define (class-direct-supers      c) (%slot-ref c 'direct-supers))
@@ -672,9 +677,9 @@
 (define (%set-class-slots!          c x) (%slot-set! c 'slots          x))
 (define (%set-class-nfields!        c x) (%slot-set! c 'nfields        x))
 (define (%set-class-field-initializers! c x)
-                                         (%slot-set! c 'field-initializers x))
+  (%slot-set! c 'field-initializers x))
 (define (%set-class-getters-n-setters! c x)
-                                         (%slot-set! c 'getters-n-setters x))
+  (%slot-set! c 'getters-n-setters x))
 (define (%set-class-cpl!            c x) (%slot-set! c 'cpl            x))
 (define (%set-class-name!           c x) (%slot-set! c 'name           x))
 (define (%set-class-initializers!   c x) (%slot-set! c 'initializers   x))
@@ -869,6 +874,7 @@
 ;;; be created when the generics are constructed).
 
 (define (method:compute-apply-method call-next-method method)
+  (printf "method:compute-apply-method\n")
   (let* ([specializers (%method-specializers method)]
          [*no-next-method* ; see the *no-next-method* trick below
 	  (lambda (kws kw-args args)
@@ -884,6 +890,7 @@
     ;;; TODO: Check keyword args
     (make-keyword-procedure
      (lambda (kws kw-args . args)
+       (printf "applying method ~a\n" (method-name method))
        (cond [(if exact?
 		  (not (= (length args) required))
 		  (< (length args) required))
@@ -948,6 +955,7 @@
   ;; add singleton specializer value (if any) to the corresponding hash table
   ;; in singletons-list.
   (define (add-to-singletons-list specs tables)
+    (printf "add-to-singletons-list\n")
     (cond
      [(null? specs) null]
      [(%singleton? (car specs))
@@ -959,24 +967,30 @@
       (cons (car tables)
             (add-to-singletons-list (cdr specs) (cdr tables)))]))
   (define (n-falses n)
+    (printf "n-falses\n")
     (let loop ([n n] [r '()]) (if (zero? n) r (loop (sub1 n) (cons #f r)))))
   (let ([tables    (%generic-singletons-list generic)]
         [specs     (%method-specializers method)]
         [qualifier (%method-qualifier method)])
     ;; make sure that tables always contain enough hash tables (or #f's)
+    (printf "add-method ~a\n" (generic-name generic))
     (cond [(eq? tables ???)
            (set! tables (n-falses (length specs)))]
           [(< (length tables) (length specs))
            (set! tables (append
                          tables
                          (n-falses (- (length specs) (length tables)))))])
+    (printf "add-method: 1\n")
     (set! tables (add-to-singletons-list specs tables))
+    (printf "add-method: 2\n")
     (%set-generic-singletons-list! generic tables)
+    (printf "add-method: 3\n")
     (if (memq generic generic-invocation-generics)
-      ;; reset all caches by changing the value of *generic-app-cache-tag*
-      (set! *generic-app-cache-tag* (list #f))
-      ;; reset this generic app-cache
-      (%set-generic-app-cache! generic ???))
+        ;; reset all caches by changing the value of *generic-app-cache-tag*
+        (set! *generic-app-cache-tag* (list #f))
+        ;; reset this generic app-cache
+        (%set-generic-app-cache! generic ???))
+    (printf "add-method 4\n")
     (%set-generic-methods!
      generic
      (cons method
@@ -984,7 +998,9 @@
                      (not (and (every eq? (method-specializers m) specs)
                                (eq? (%method-qualifier m) qualifier))))
                    (%generic-methods generic))))
-    (set-instance-proc! generic (compute-apply-generic generic))))
+    (printf "add-method 5\n")
+    (set-instance-proc! generic (compute-apply-generic generic))
+    (printf "add-method 6\n")))
 
 ;;; Adding a method calls COMPUTE-APPLY-GENERIC, the result of which calls the
 ;;; other generics in the generic invocation protocol.  Two, related, problems
@@ -999,81 +1015,92 @@
 (set-instance-proc!
  compute-apply-generic
  (lambda (generic)
+   (printf "compute-apply-generic (bootstrap)\n")
    ((%method-procedure (car (%generic-methods generic))) '() generic)))
 
-(add-method compute-apply-generic
-  (make-method
-   #:name "{compute-apply-generic <generic>}"
-   (list <generic>)
-   (lambda (call-next-method generic)
-     ;; This function converts the list of arguments to a list of keys to look
-     ;; for in the cache - use the argument's class except when there is a
-     ;; corresponding singleton with the same value at the same position.
-     (define (get-keys args tables)
-       (let loop ([args args] [tables tables] [ks '()])
-	 (if (or (null? tables) (null? args))
-	     (reverse ks)
-	     (loop (cdr args) (cdr tables)
-		   (cons (if (and (car tables)
-				  (hash-ref
-				   (car tables) (car args) false-func))
-			     (car args)
-			     (class-of (car args)))
-			 ks)))))
-     ;; This is the main function that brings the correct value from the
-     ;; cache, or generates one and store it if there is no entry, or the
-     ;; cache was reset.  Finally, it is applied to the arguments as usual.
-     ;; NOTE: This code is delicate! Handle with extreme care!
-     (make-keyword-procedure
-      (lambda (kws kw-args . args)
-	(let ([app-cache (%generic-app-cache generic)]
-	      [arity     (%generic-arity generic)]
-	      [keys      (get-keys args (%generic-singletons-list generic))]
-	      [ground?   (and ;* Ground case
-			  (memq generic generic-invocation-generics)
-			  (pair? args)
-			  (memq (car args) generic-invocation-generics))])
-	  ;; This function creates the cached closure -- the assumption is that
-	  ;; `keys' contain a specification that will identify all calls that
-	  ;; will have this exact same list.
-	  ;; TODO: Include keyword args here!
-	  (define (compute-callable)
-	    (let ([c (if ground?
-			 (let ([m (%method-procedure
-				   (last (%generic-methods generic)))])
-			   (make-keyword-procedure
-			    (lambda (kws kw-args . args)
-			      (keyword-apply m kws kw-args #f args))))
-			 (compute-apply-methods
-			  generic (compute-methods generic args)))])
-	      (hash-set! (cdr app-cache) keys c)
-	      c))
-	  ;; TODO: checks for keyword args
-	  (when (cond [(not arity) #f]
-		      [(integer? arity) (not (= (length args) arity))]
-		      [else (< (length args) (arity-at-least-value arity))])
-	    (let ([least (and (arity-at-least? arity)
-			      (arity-at-least-value arity))])
-	      (raise* make-exn:fail:contract:arity
-		      "generic ~a: expects ~a~e argument~a, given ~e~a"
-		      (%generic-name generic)
-		      (if least "at least " "") (or least arity)
-		      (if (= 1 (or least arity)) "" "s") (length args)
-		      (if (null? args) "" (format ": ~e" args)))))
-	  (when (or (eq? app-cache ???)
-		    (not (eq? (car app-cache) *generic-app-cache-tag*)))
-	    (set! app-cache (cons *generic-app-cache-tag*
-				  (make-weak-hash)))
-	    (%set-generic-app-cache! generic app-cache))
-	  (keyword-apply (hash-ref (cdr app-cache) keys compute-callable)
-			 kws kw-args args)))))))
+(add-method 
+ compute-apply-generic
+ (make-method
+  #:name "{compute-apply-generic <generic>}"
+  (list <generic>)
+  (lambda (call-next-method generic)
+    (printf "compute-apply-generic <generic>\n")
+    ;; This function converts the list of arguments to a list of keys to look
+    ;; for in the cache - use the argument's class except when there is a
+    ;; corresponding singleton with the same value at the same position.
+    (define (get-keys args tables)
+      (printf "get-keys\n")
+      (let loop ([args args] [tables tables] [ks '()])
+        (if (or (null? tables) (null? args))
+            (reverse ks)
+            (loop (cdr args) (cdr tables)
+                  (cons (if (and (car tables)
+                                 (hash-ref
+                                  (car tables) (car args) false-func))
+                            (car args)
+                            (class-of (car args)))
+                        ks)))))
+    ;; This is the main function that brings the correct value from the
+    ;; cache, or generates one and store it if there is no entry, or the
+    ;; cache was reset.  Finally, it is applied to the arguments as usual.
+    ;; NOTE: This code is delicate! Handle with extreme care!
+    (make-keyword-procedure
+     (lambda (kws kw-args . args)
+       (printf "applying generic ~a\n" (generic-name generic))
+       (let ([app-cache (%generic-app-cache generic)]
+             [arity     (%generic-arity generic)]
+             [keys      (get-keys args (%generic-singletons-list generic))]
+             [ground?   (and ;* Ground case
+                         (memq generic generic-invocation-generics)
+                         (pair? args)
+                         (memq (car args) generic-invocation-generics))])
+         ;; This function creates the cached closure -- the assumption is that
+         ;; `keys' contain a specification that will identify all calls that
+         ;; will have this exact same list.
+         ;; TODO: Include keyword args here!
+         (printf "applying generic: computed caches\n")
+         (define (compute-callable)
+           (printf "compute-callable\n")
+           (let ([c (if ground?
+                        (let ([m (%method-procedure
+                                  (last (%generic-methods generic)))])
+                          (make-keyword-procedure
+                           (lambda (kws kw-args . args)
+                             (keyword-apply m kws kw-args #f args))))
+                        (compute-apply-methods
+                         generic (compute-methods generic args)))])
+             (hash-set! (cdr app-cache) keys c)
+             c))
+         ;; TODO: checks for keyword args
+         (printf "applying generic: arity checks\n")
+         (when (cond [(not arity) #f]
+                     [(integer? arity) (not (= (length args) arity))]
+                     [else (< (length args) (arity-at-least-value arity))])
+           (let ([least (and (arity-at-least? arity)
+                             (arity-at-least-value arity))])
+             (raise* make-exn:fail:contract:arity
+                     "generic ~a: expects ~a~e argument~a, given ~e~a"
+                     (%generic-name generic)
+                     (if least "at least " "") (or least arity)
+                     (if (= 1 (or least arity)) "" "s") (length args)
+                     (if (null? args) "" (format ": ~e" args)))))
+         (printf "applying generic: performed arity checks\n")
+         (when (or (eq? app-cache ???)
+                   (not (eq? (car app-cache) *generic-app-cache-tag*)))
+           (printf "applying generic: invalidating app cache\n")
+           (set! app-cache (cons *generic-app-cache-tag*
+                                 (make-weak-hash)))
+           (%set-generic-app-cache! generic app-cache))
+         (printf "applying method: extracting method from app cache: ~a\n" keys)
+         (define real-method (hash-ref (cdr app-cache) keys compute-callable))
+         (printf "applying generic: calling keyword-apply\n")
+         (keyword-apply real-method kws kw-args args)))))))
 
-#;
 (add-method compute-methods
-  (make-method
-   #:name "{compute-methods <generic>}"
-   (list <generic>)
+  (make-method #:name "{compute-methods <generic>}"
+    (list <generic>)
     (lambda (call-next-method generic args)
+      (printf "compute-methods\n")
       (let ([more-specific-for-args? (compute-method-more-specific? generic)])
         (sort (filter
                (lambda (m)
@@ -1081,19 +1108,21 @@
                  (every instance-of? args (%method-specializers m)))
                (%generic-methods generic))
               (lambda (m1 m2) (more-specific-for-args? m1 m2 args)))))))
-#;
+
 (add-method compute-method-more-specific?
-  (make-method (list <generic>)
+  (make-method #:name "{method-more-specific <generic>}"
+    (list <generic>)
     (lambda (call-next-method generic)
+      (printf "compute-method-more-specific?\n")
       (lambda (m1 m2 args)
         (let loop ([specls1 (%method-specializers m1)]
                    [specls2 (%method-specializers m2)]
                    [args    args])
           (cond [(and (null? specls1) (null? specls2))
                  (if (eq? (%method-qualifier m1) (%method-qualifier m2))
-                   (error 'generic
-                          "two methods are equally specific in ~e" generic)
-                   #f)]
+		     (error 'generic
+			    "two methods are equally specific in ~e" generic)
+		     #f)]
                 ;; some methods in this file have fewer specializers than
                 ;; others, for things like args -- so remove this, leave the
                 ;; args check but treat the missing as if it's <top>
@@ -1106,97 +1135,128 @@
                         "fewer arguments than specializers for ~e" generic)]
                 [(null? specls1) ; see above -> treat this like <top>
                  (if (eq? <top> (car specls2))
-                   (loop specls1 (cdr specls2) (cdr args))
-                   #f)]
+		     (loop specls1 (cdr specls2) (cdr args))
+		     #f)]
                 [(null? specls2) ; see above -> treat this like <top>
                  (if (eq? <top> (car specls1))
-                   (loop (cdr specls1) specls2 (cdr args))
-                   #t)]
+		     (loop (cdr specls1) specls2 (cdr args))
+		     #t)]
                 [else (let ([c1 (car specls1)] [c2 (car specls2)])
                         (if (eq? c1 c2)
-                          (loop (cdr specls1) (cdr specls2) (cdr args))
-                          (more-specific? c1 c2 (car args))))]))))))
+			    (loop (cdr specls1) (cdr specls2) (cdr args))
+			    (more-specific? c1 c2 (car args))))]))))))
 
-#;
 (add-method compute-apply-methods
-  (make-method
-   #:name "{compute-apply-methods <generic>}"
-   (list <generic>)
-   (lambda (call-next-method generic methods)
-     (let ([primaries '()] [arounds '()] [befores '()] [afters '()]
-	   [combination (%generic-combination generic)])
-       ;; *** Trick: this (and in <method> above) is the only code that is
-       ;; supposed to ever apply a method procedure.  So, the closure that
-       ;; will invoke `no-next-method' is named `*no-next-method*' so it is
-       ;; identifiable.  The only way to break this would be to call the
-       ;; method-procedure directly on an object with such a name.
-       (define one-step
-	 (if combination
-	     (combination generic)
-	     (lambda (tail args)
-	       (lambda newargs
-		 ;; tail is never null: (null? (cdr tail)) below, and the fact
-		 ;; that this function is applied on the primaries which are
-		 ;; never null
-		 (let ([args (if (null? newargs) args newargs)])
-		   (apply (cdar tail)
-			  (if (null? (cdr tail))
-			      (lambda args
-				;; TODO kws kw-args
-				(no-next-method generic (caar tail) kws kw-args args))
-			      (one-step (cdr tail) args))
-			  args))))))
-       (define ((apply-before/after-method args) method)
-	 (apply (cdr method)
-		(lambda args
-		  ;; TODO: kws kw-args
-		  (no-next-method generic (car method) kws kw-args args))
-		args))
-       (define ((call-before-primary-after args) . newargs)
-	 ;; could supply newargs below, but change before calling befores
-	 (let ([args (if (null? newargs) args newargs)])
-	   (for-each (apply-before/after-method args) befores)
-	   (begin0 ((one-step primaries args))
-	     (for-each (apply-before/after-method args) afters))))
-       (define (one-around-step tail args)
-	 (if (null? tail)
-	     (call-before-primary-after args)
-	     (lambda newargs
-	       (let ([args (if (null? newargs) args newargs)])
-		 (apply (cdar tail) (one-around-step (cdr tail) args) args)))))
-       ;; first sort by qualifier and pull out method-procedures
-       (let loop ([ms methods])
-	 (unless (null? ms)
-	   (let-syntax ([push! (syntax-rules ()
-				 [(_  p)
-				  (set! p (cons (cons (car ms)
-						      (%method-procedure (car ms)))
-						p))])])
-	     (case (%method-qualifier (car ms))
-	       [(primary) (push! primaries)]
-	       [(around)  (push! arounds)]
-	       [(before)  (push! befores)]
-	       [(after)   (push! afters)]
-	       ;; ignore other qualifiers
-	       ;; [else (error 'compute-apply-methods
-	       ;;              "a method ~e has an unexpected qualifier `~e'"
-	       ;;              (car methods)
-	       ;;              (%method-qualifier (car methods)))]
-	       )
-	     (loop (cdr ms)))))
-       (set! primaries (reverse primaries))
-       (set! arounds   (reverse arounds))
-       (set! befores   (reverse befores))
-       ;; no reverse for afters
-       (cond [(null? primaries)
-	      (lambda args (apply no-applicable-method generic args))]
-	     ;; optimize common case of only primaries
-	     [(and (null? befores) (null? afters) (null? arounds))
-	      ;; args is initialized to () since if it is a generic of no
-	      ;; arguments then it will always stay so, otherwise, the first
-	      ;; call will have the real arguments anyway
-	      (one-step primaries '())]
-	     [else (one-around-step arounds '())])))))
+  (make-method #:name "{compute-apply-methods <generic>}"
+    (list <generic>)
+    (lambda (call-next-method generic methods)
+      (let ([primaries '()] [arounds '()] [befores '()] [afters '()]
+	    [combination (%generic-combination generic)])
+	(define-syntax (let-args stx)
+	  (syntax-parse stx
+	    [(_ ([kws:id  new-kws:id]
+		 [kw-args:id new-kw-args:id]
+		 [args:id new-args:id])
+		body:expr ...+)
+	     (syntax-protect
+	      #'(begin
+		  (when (xor (null? new-kws) (null? new-kw-args))
+		    (error 'compute-apply-methods
+			   "~e and ~e must both be null or non-null"
+			   new-kws new-kw-args))
+		  (let-values ([(new-kws new-kw-args)
+				(if (null? new-kws) 
+				    (values kws kw-args)
+				    (values new-kws new-kw-args))])
+		    (let ([args (if (null? new-args) args new-args)])
+		      body ...))))]))
+	;; TODO: This comment does not seem to be relevant anymore... --tc
+	;; *** Trick: this (and in <method> above) is the only code that is
+	;; supposed to ever apply a method procedure.  So, the closure that
+	;; will invoke `no-next-method' is named `*no-next-method*' so it is
+	;; identifiable.  The only way to break this would be to call the
+	;; method-procedure directly on an object with such a name.
+	(define one-step
+	  (if combination
+	      (combination generic)
+	      (lambda (tail kws kw-args args)
+		;; tail is never null: (null? (cdr tail)) below, and the fact
+		;; that this function is applied on the primaries which are
+		;; never null
+		(make-keyword-procedure
+		 (lambda (new-kws new-kw-args . new-args)
+		   (let-args ([kws new-kws]
+			      [kw-args new-kw-args]
+			      [args new-args])
+		     (keyword-apply
+		      (cdar tail)
+		      (if (null? (cdr tail))
+			  (lambda (kws kw-args args)
+			    (no-next-method generic (caar tail)
+					    kws kw-args args))
+			  (keyword-apply one-step kws kw-args (cdr tail) args))
+		      args)))))))
+
+	(define ((apply-before/after-method kws kw-args args) method)
+          (keyword-apply (cdr method) kws kw-args
+                         (lambda (kws kw-args args)
+                           (no-next-method generic (car method) kws kw-args args))
+                         args))
+
+	(define (call-before-primary-after kws kw-args args)
+	  (make-keyword-procedure
+	   (lambda (new-kws new-kw-args . new-args)
+	     ;; could supply newargs below, but change before calling befores
+	     (let-args ([kws new-kws]
+			[kw-args new-kw-args]
+			[args new-args])
+	       (for-each (apply-before/after-method kws kw-args args) befores)
+	       (begin0 ((one-step primaries args))
+		 (for-each (apply-before/after-method args) afters))))))
+
+        (define (one-around-step tail kws kw-args args)
+          (if (null? tail)
+              (call-before-primary-after kws kw-args args)
+              (make-keyword-procedure
+               (lambda (new-kws new-kw-args . new-args)
+                 (let-args ([kws new-kws]
+                            [kw-args new-kw-args]
+                            [args new-args])
+                   (keyword-apply (cdar tail) kws kw-args
+                                  (one-around-step (cdr tail) args) args))))))
+        ;; first sort by qualifier and pull out method-procedures
+        (let loop ([ms methods])
+          (unless (null? ms)
+            (let-syntax ([push! (syntax-rules ()
+                                  [(_  p)
+                                   (set! p (cons (cons (car ms)
+                                                       (%method-procedure (car ms)))
+                                                 p))])])
+              (case (%method-qualifier (car ms))
+                [(primary) (push! primaries)]
+                [(around)  (push! arounds)]
+                [(before)  (push! befores)]
+                [(after)   (push! afters)]
+                ;; ignore other qualifiers
+                ;; [else (error 'compute-apply-methods
+                ;;              "a method ~e has an unexpected qualifier `~e'"
+                ;;              (car methods)
+                ;;              (%method-qualifier (car methods)))]
+                )
+              (loop (cdr ms)))))
+        (set! primaries (reverse primaries))
+        (set! arounds   (reverse arounds))
+        (set! befores   (reverse befores))
+        ;; no reverse for afters
+        (cond [(null? primaries)
+               (lambda args (apply no-applicable-method generic args))]
+              ;; optimize common case of only primaries
+              [(and (null? befores) (null? afters) (null? arounds))
+               ;; args is initialized to () since if it is a generic of no
+               ;; arguments then it will always stay so, otherwise, the first
+               ;; call will have the real arguments anyway
+               (one-step primaries '() '() '())]
+              [else (one-around-step arounds '() '() '())])))))
 
 (define-placeholders  <primitive-class> <primitive-procedure>
   <opaque-struct> <struct>
@@ -1982,4 +2042,12 @@
 (define (generic?  x) (instance-of? x <generic>))
 (define (method?   x) (instance-of? x <method>))
 
+||#
+;;; Add some additional indentation information for emacs
+#||
+Local Variables:
+eval: (mapc (lambda (sym)
+              (put sym 'scheme-indent-function #'scheme-let-indent))
+            (list 'let-args))
+End:
 ||#
