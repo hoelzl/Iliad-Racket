@@ -125,8 +125,7 @@
 ;;;; ==============
 
 (define-syntax-rule (define-placeholder name)
-  (define (name . args)
-    (error 'define-placeholder "Not yet implemented")))
+  (define name (make <class> #:name 'name)))
 
 (define-syntax-rule (define-placeholders name ...)
   (begin
@@ -217,6 +216,60 @@
 		 (rest kw-args-1)
 		 kws-2
 		 kw-args-2)])))
+
+(define (extract-allowed-keywords actual-kws actual-kw-args allowed-kws)
+  (let loop ([result-kws '()]
+             [result-kw-args '()]
+             [actual-kws actual-kws]
+             [actual-kw-args actual-kw-args]
+             [allowed-kws allowed-kws])
+    (if (or (null? actual-kws) (null? allowed-kws))
+        (values (reverse result-kws)
+                (reverse result-kw-args))
+        (let ([first-actual-kw (first actual-kws)]
+              [first-allowed-kw (first allowed-kws)])
+          (cond [(eq? first-actual-kw first-allowed-kw)
+                 (loop (cons first-actual-kw result-kws)
+                       (cons (first actual-kw-args) result-kw-args)
+                       (rest actual-kws)
+                       (rest actual-kw-args)
+                       (rest allowed-kws))]
+                [(keyword<? first-actual-kw first-allowed-kw)
+                 (loop result-kws
+                       result-kw-args
+                       (rest actual-kws)
+                       (rest actual-kw-args)
+                       allowed-kws)]
+                [else
+                 (loop result-kws
+                       result-kw-args
+                       actual-kws
+                       actual-kw-args
+                       (rest allowed-kws))])))))
+
+(define (initargs->hash initargs)
+  (let loop ([result (make-immutable-hasheq)]
+             [initargs initargs])
+    (if (null? initargs)
+        result
+        (let ([keyword (first initargs)])
+          (unless (keyword? keyword)
+            (error 'initargs->hash
+                   (format "~a is not a valid initarg" keyword)))
+          (define-values (value new-args)
+            (let collect-values ([result '()]
+                                 [args (rest initargs)])
+              (if (or (null? args) (keyword? (first args)))
+                  (cond [(null? result)
+                         (values #t args)]
+                        [(null? (rest result))
+                         (values (first result) args)]
+                        [else 
+                         (values (reverse result) args)])
+                  (collect-values (cons (first args) result)
+                                  (rest args)))))
+          (loop (hash-set result (keyword->symbol keyword) value)
+                new-args)))))
 
 ;;; Utilities for Generics
 ;;; ----------------------
@@ -322,7 +375,10 @@
 ;;; implementation of instances and entities from people.
 
 (define ??? (letrec ([x x]) x)) ; this is Racket's #<undefined> value
-(define unspecified-initializer (lambda args ???))
+(define unspecified-initializer
+  (make-keyword-procedure
+   (lambda (kws kw-args . args)
+     ???)))
 (define false-func (lambda args #f))
 
 ;; Basic allocation follows, all was in a single let, but this is not needed
@@ -438,7 +494,7 @@
 (struct slot (name properties))
 
 (define (make-slot-named name)
-  (slot name (make-hasheq)))
+  (slot name (make-immutable-hasheq)))
 
 (define (slot-property slot key [default #f])
   (when (keyword? key)
@@ -648,7 +704,10 @@
   (let ([a (procedure-arity (%method-procedure m))])
     (cond [(integer? a) (sub1 a)]
           [(arity-at-least? a)
-           (make-arity-at-least (sub1 (arity-at-least-value a)))]
+           ;; keyword-procedures always return (arity-at-least 0)...
+           (if (zero? (arity-at-least-value a))
+               (make-arity-at-least 0)
+               (make-arity-at-least (sub1 (arity-at-least-value a))))]
           [else (error 'method-arity "the procedure in ~.s has bad arity ~e"
                        m a)])))
 
@@ -843,6 +902,20 @@
 		  (raise* make-exn:fail:contract
 			  "slot-set!: slot `~.s' in <method> is locked" slot))))
 
+;;; Default values
+;;; --------------
+
+;;; Having defined the necessary classes, we can now introduce
+;;; parameters for default values.
+
+(define *default-class-class*       (make-parameter <class>))
+(define *default-entityclass-class* (make-parameter <entity-class>))
+(define *default-method-class*      (make-parameter <method>))
+(define *default-generic-class*     (make-parameter <generic>))
+
+(define *default-object-class* (make-parameter #f))
+
+
 (define (make-class [name '-anonymous-]
 		    [direct-supers (list <object>)]
 		    [direct-slots '()])
@@ -874,7 +947,7 @@
 ;;; be created when the generics are constructed).
 
 (define (method:compute-apply-method call-next-method method)
-  (printf "method:compute-apply-method\n")
+  ;; (printf "method:compute-apply-method\n")
   (let* ([specializers (%method-specializers method)]
          [*no-next-method* ; see the *no-next-method* trick below
 	  (lambda (kws kw-args args)
@@ -890,7 +963,7 @@
     ;;; TODO: Check keyword args
     (make-keyword-procedure
      (lambda (kws kw-args . args)
-       (printf "applying method ~a\n" (method-name method))
+       ;; (printf "applying method ~a\n" (method-name method))
        (cond [(if exact?
 		  (not (= (length args) required))
 		  (< (length args) required))
@@ -955,7 +1028,7 @@
   ;; add singleton specializer value (if any) to the corresponding hash table
   ;; in singletons-list.
   (define (add-to-singletons-list specs tables)
-    (printf "add-to-singletons-list\n")
+    ;; (printf "add-to-singletons-list\n")
     (cond
      [(null? specs) null]
      [(%singleton? (car specs))
@@ -967,30 +1040,30 @@
       (cons (car tables)
             (add-to-singletons-list (cdr specs) (cdr tables)))]))
   (define (n-falses n)
-    (printf "n-falses\n")
+    ;; (printf "n-falses\n")
     (let loop ([n n] [r '()]) (if (zero? n) r (loop (sub1 n) (cons #f r)))))
   (let ([tables    (%generic-singletons-list generic)]
         [specs     (%method-specializers method)]
         [qualifier (%method-qualifier method)])
     ;; make sure that tables always contain enough hash tables (or #f's)
-    (printf "add-method ~a\n" (generic-name generic))
+    ;; (printf "add-method ~a\n" (generic-name generic))
     (cond [(eq? tables ???)
            (set! tables (n-falses (length specs)))]
           [(< (length tables) (length specs))
            (set! tables (append
                          tables
                          (n-falses (- (length specs) (length tables)))))])
-    (printf "add-method: 1\n")
+    ;; (printf "add-method: 1\n")
     (set! tables (add-to-singletons-list specs tables))
-    (printf "add-method: 2\n")
+    ;; (printf "add-method: 2\n")
     (%set-generic-singletons-list! generic tables)
-    (printf "add-method: 3\n")
+    ;; (printf "add-method: 3\n")
     (if (memq generic generic-invocation-generics)
         ;; reset all caches by changing the value of *generic-app-cache-tag*
         (set! *generic-app-cache-tag* (list #f))
         ;; reset this generic app-cache
         (%set-generic-app-cache! generic ???))
-    (printf "add-method 4\n")
+    ;; (printf "add-method 4\n")
     (%set-generic-methods!
      generic
      (cons method
@@ -998,9 +1071,8 @@
                      (not (and (every eq? (method-specializers m) specs)
                                (eq? (%method-qualifier m) qualifier))))
                    (%generic-methods generic))))
-    (printf "add-method 5\n")
-    (set-instance-proc! generic (compute-apply-generic generic))
-    (printf "add-method 6\n")))
+    ;; (printf "add-method 5\n")
+    (set-instance-proc! generic (compute-apply-generic generic))))
 
 ;;; Adding a method calls COMPUTE-APPLY-GENERIC, the result of which calls the
 ;;; other generics in the generic invocation protocol.  Two, related, problems
@@ -1015,7 +1087,7 @@
 (set-instance-proc!
  compute-apply-generic
  (lambda (generic)
-   (printf "compute-apply-generic (bootstrap)\n")
+   ;; (printf "compute-apply-generic (bootstrap)\n")
    ((%method-procedure (car (%generic-methods generic))) '() generic)))
 
 (add-method 
@@ -1024,12 +1096,12 @@
   #:name "{compute-apply-generic <generic>}"
   (list <generic>)
   (lambda (call-next-method generic)
-    (printf "compute-apply-generic <generic>\n")
+    ;; (printf "compute-apply-generic <generic>\n")
     ;; This function converts the list of arguments to a list of keys to look
     ;; for in the cache - use the argument's class except when there is a
     ;; corresponding singleton with the same value at the same position.
     (define (get-keys args tables)
-      (printf "get-keys\n")
+      ;; (printf "get-keys\n")
       (let loop ([args args] [tables tables] [ks '()])
         (if (or (null? tables) (null? args))
             (reverse ks)
@@ -1046,7 +1118,7 @@
     ;; NOTE: This code is delicate! Handle with extreme care!
     (make-keyword-procedure
      (lambda (kws kw-args . args)
-       (printf "applying generic ~a\n" (generic-name generic))
+       ;; (printf "applying generic ~a\n" (generic-name generic))
        (let ([app-cache (%generic-app-cache generic)]
              [arity     (%generic-arity generic)]
              [keys      (get-keys args (%generic-singletons-list generic))]
@@ -1058,9 +1130,9 @@
          ;; `keys' contain a specification that will identify all calls that
          ;; will have this exact same list.
          ;; TODO: Include keyword args here!
-         (printf "applying generic: computed caches\n")
+         ;; (printf "applying generic: computed caches\n")
          (define (compute-callable)
-           (printf "compute-callable\n")
+           ;; (printf "compute-callable\n")
            (let ([c (if ground?
                         (let ([m (%method-procedure
                                   (last (%generic-methods generic)))])
@@ -1072,7 +1144,7 @@
              (hash-set! (cdr app-cache) keys c)
              c))
          ;; TODO: checks for keyword args
-         (printf "applying generic: arity checks\n")
+         ;; (printf "applying generic: arity checks\n")
          (when (cond [(not arity) #f]
                      [(integer? arity) (not (= (length args) arity))]
                      [else (< (length args) (arity-at-least-value arity))])
@@ -1084,23 +1156,23 @@
                      (if least "at least " "") (or least arity)
                      (if (= 1 (or least arity)) "" "s") (length args)
                      (if (null? args) "" (format ": ~e" args)))))
-         (printf "applying generic: performed arity checks\n")
+         ;; (printf "applying generic: performed arity checks\n")
          (when (or (eq? app-cache ???)
                    (not (eq? (car app-cache) *generic-app-cache-tag*)))
-           (printf "applying generic: invalidating app cache\n")
+           ;; (printf "applying generic: invalidating app cache\n")
            (set! app-cache (cons *generic-app-cache-tag*
                                  (make-weak-hash)))
            (%set-generic-app-cache! generic app-cache))
-         (printf "applying method: extracting method from app cache: ~a\n" keys)
+         ;; (printf "applying method: extracting method from app cache: ~a\n" keys)
          (define real-method (hash-ref (cdr app-cache) keys compute-callable))
-         (printf "applying generic: calling keyword-apply\n")
+         ;; (printf "applying generic: calling keyword-apply\n")
          (keyword-apply real-method kws kw-args args)))))))
 
 (add-method compute-methods
   (make-method #:name "{compute-methods <generic>}"
     (list <generic>)
     (lambda (call-next-method generic args)
-      (printf "compute-methods\n")
+      ;; (printf "compute-methods\n")
       (let ([more-specific-for-args? (compute-method-more-specific? generic)])
         (sort (filter
                (lambda (m)
@@ -1113,7 +1185,7 @@
   (make-method #:name "{method-more-specific <generic>}"
     (list <generic>)
     (lambda (call-next-method generic)
-      (printf "compute-method-more-specific?\n")
+      ;; (printf "compute-method-more-specific?\n")
       (lambda (m1 m2 args)
         (let loop ([specls1 (%method-specializers m1)]
                    [specls2 (%method-specializers m2)]
@@ -1189,12 +1261,12 @@
 			      [kw-args new-kw-args]
 			      [args new-args])
 		     (keyword-apply
-		      (cdar tail)
+		      (cdar tail) kws kw-args
 		      (if (null? (cdr tail))
 			  (lambda (kws kw-args args)
 			    (no-next-method generic (caar tail)
 					    kws kw-args args))
-			  (keyword-apply one-step kws kw-args (cdr tail) args))
+			  (one-step (cdr tail) kws kw-args args))
 		      args)))))))
 
 	(define ((apply-before/after-method kws kw-args args) method)
@@ -1258,39 +1330,34 @@
                (one-step primaries '() '() '())]
               [else (one-around-step arounds '() '() '())])))))
 
-(define-placeholders  <primitive-class> <primitive-procedure>
-  <opaque-struct> <struct>
-  more-specific?
-  *default-object-class* instance-of?)
-
-#||
-
 (define (make-generic-combination
           #:init [init '()] #:combine [combine cons]
 	  #:process-methods [process-methods #f] 
 	  #:process-result [process-result #f]
 	  #:control [control #f])
   (lambda (generic)
-    (lambda (tail dummy-args)
+    (lambda (tail kws kw-args dummy-args)
       (let ([tail (if process-methods (process-methods tail) tail)])
-        (lambda (kws kw-args . args)
-          (let loop ([res init] [tail tail])
-            ;; see *no-next-method* trick above
-            (let ([*no-next-method*
-                   (lambda (kws kw-args args)
-		     (no-next-method generic (caar tail) kws kw-args args))])
-              (if (null? tail)
-                (if process-result (process-result res) res)
-                (if control
-                  (control loop res
-                           (lambda ()
-			     (keyword-apply (cdar tail) kws kw-args
-					    *no-next-method* args))
-                           (cdr tail))
-                  (loop (combine
-			 (keyword-apply (cdar tail) kws kw-args
-					*no-next-method* args) res)
-                        (cdr tail)))))))))))
+        (make-keyword-procedure
+         (lambda (kws kw-args . args)
+           (let loop ([res init] [tail tail])
+             ;; see *no-next-method* trick above
+             (let ([*no-next-method*
+                    (lambda (kws kw-args args)
+                      (no-next-method generic (caar tail) kws kw-args args))])
+               (if (null? tail)
+                   (if process-result (process-result res) res)
+                   (if control
+                       (control loop res
+                                (lambda ()
+                                  (keyword-apply (cdar tail) kws kw-args
+                                                 *no-next-method* args))
+                                (cdr tail))
+                       (loop (combine
+                              (keyword-apply (cdar tail) kws kw-args
+                                             *no-next-method* args) res)
+                             (cdr tail))))))))))))
+
 
 (define generic-+-combination
   (make-generic-combination #:init 0 #:combine +))
@@ -1320,7 +1387,9 @@
 
 ;; optimized helper
 (define-syntax-rule (%struct->class c)
-  (if (struct-type? c) (struct-type->class c) c))
+  (if (struct-type? c) 
+      (struct-type->class c)
+      c))
 
 (define (subclass? c1 c2)
   (if (%singleton? c1)
@@ -1335,6 +1404,8 @@
       (if (%singleton? c)
         ;; efficiency: similar to `subclass?' above
         (eq? (singleton-value c) x)
+        ;;; TODO: Why do we need %struct->class here?  Should class-of
+        ;;; not always return a "real" class?
         (memq (%struct->class c) (%class-cpl (%struct->class (class-of x)))))))
 
 (define/macro class? %class? (x)
@@ -1349,27 +1420,28 @@
     (let ([cc1 (memq (%struct->class c1) (%class-cpl (class-of arg)))])
       (and cc1 (memq (%struct->class c2) (cdr cc1))))))
 
-;;; TODO: Keywords
 (add-method initialize
   (make-method (list <top>)
-    (lambda (call-next-method object initargs)
-      (error 'initialize "can't initialize an instance of ~e"
-             (class-of object)))))
+    (make-keyword-procedure
+     (lambda (kws kw-args call-next-method object)
+       (error 'initialize "can't initialize an instance of ~e"
+              (class-of object))))))
 
-;;; TODO: Keywords
 (add-method initialize
   (make-method (list <object>)
-    (lambda (call-next-method object initargs)
-      (let* ([class (class-of object)]
-             [field-initializers (%class-field-initializers class)])
-        (for-each (lambda (init) (apply init initargs))
-                  (%class-initializers class))
-        (let loop ([n 0] [inits field-initializers])
-          (when (pair? inits)
-            (%instance-set! object n (apply (car inits) initargs))
-            (loop (+ n 1) (cdr inits))))))))
+    (make-keyword-procedure
+     (lambda (kws kw-args call-next-method object)
+       (let* ([class (class-of object)]
+              [field-initializers (%class-field-initializers class)])
+         ;; TODO: Define the initializers so that they can be
+         ;; keyword-applied.
+         (for-each (lambda (init) (keyword-apply kws kw-args init '()))
+                   (%class-initializers class))
+         (let loop ([n 0] [inits field-initializers])
+           (when (pair? inits)
+             (%instance-set! object n (keyword-apply (car inits) kws kw-args '()))
+             (loop (+ n 1) (cdr inits)))))))))
 
-;;; TODO: Keywords
 (add-method initialize
   (make-method (list <class>)
     (lambda (call-next-method class
@@ -1377,6 +1449,7 @@
 			      #:direct-supers [supers '()]
 			      #:autoinitargs [autoinitargs #f]
 			      #:direct-slots [dslots '()])
+      ;; (printf "initialize: <class>\n")
       (call-next-method)
       (%set-class-direct-supers!
        class
@@ -1388,6 +1461,11 @@
           [(not (list? supers)) (error 'class "bad superclasses: ~e" supers)]
           [else (let ([c (find
                           (lambda (c)
+                            ;; TODO: should we use <object> here
+                            ;; instead of default?  We might want to
+                            ;; set a specialized default class but
+                            ;; still be able to inherit from
+                            ;; <object>. --tc
                             (not (and (%class? c) (subclass? c default))))
                           supers)])
                   (if c
@@ -1397,53 +1475,55 @@
       (%set-class-direct-slots!
        class
        (map (lambda (s)
-	      (if (pair? s)
-                  (if (or (not autoinitargs)
-			  ;; FIXME
-                          #; (getarg (cdr s) #:initarg)
-                          (not (symbol? (car s))))
-		      s
-		      (list* (car s) #:initarg (string->symbol
-						(string-append
-						 ":" (symbol->string (car s))))
-			     (cdr s)))
-                  (list s)))
+	      (cond [(slot? s)
+                     s]
+                    [(pair? s)
+                     (slot (first s) (initargs->hash (rest s)))]
+                    [(symbol? s)
+                     (make-slot-named s)]
+                    [else
+                     (error 'initialize
+                            (format "~a is not a valid slot spec" s))]))
 	    dslots))
       (%set-class-cpl!   class (compute-cpl   class))
       (%set-class-slots! class (compute-slots class))
       (%set-class-name!  class name)
-      (let* ([nfields 0]
-             [field-initializers '()]
-             ;; allocator: give me an initializer function, get a slot number
-             [allocator (lambda (init)
-                          (let ([f nfields])
-                            (set! nfields (+ nfields 1))
-                            (set! field-initializers
-                                  (cons init field-initializers))
-                            f))]
-             [getters-n-setters (map (lambda (slot)
-                                       (cons (car slot)
-                                             (compute-getter-and-setter
-                                              class slot allocator)))
-                                     (%class-slots class))])
-        (%set-class-nfields! class nfields)
-        (%set-class-field-initializers! class (reverse field-initializers))
-        (%set-class-getters-n-setters! class getters-n-setters))
+      (define nfields 0)
+      (define field-initializers '())
+      ;; allocator: give me an initializer function, get a slot number
+      (define allocator
+        (lambda (init)
+          (let ([f nfields])
+            (set! nfields (+ nfields 1))
+            (set! field-initializers
+                  (cons init field-initializers))
+            f)))
+      (define getters-n-setters
+        (map (lambda (slot)
+               (cons (slot-name slot)
+                     (compute-getter-and-setter class slot allocator)))
+             (%class-slots class)))
+      (%set-class-nfields! class nfields)
+      (%set-class-field-initializers! class (reverse field-initializers))
+      (%set-class-getters-n-setters! class getters-n-setters)
       (%set-class-initializers!
        class (reverse
               (append-map
                (lambda (c)
                  (if (instance-of? c <class>) (%class-initializers c) '()))
-               (cdr (%class-cpl class)))))
-      (%set-class-valid-initargs! ; for sanity checks
-       class 
-       ;;; FIXME
-       #f #;
-       (getarg initargs #:valid-initargs
-	       (thunk (append-map (lambda (slot)
-				 (getargs (cdr slot) #:initarg))
-			       (%class-slots class))))))))
+               (rest (%class-cpl class)))))
+      ;; (%set-class-valid-initargs! ; for sanity checks
+      ;;  class 
+      ;;  (getarg initargs #:valid-initargs
+      ;;          (thunk (append-map (lambda (slot)
+      ;;   			 (getargs (cdr slot) #:initarg))
+      ;;   		       (%class-slots class)))))
+      )))
 
+
+(define-placeholders  <primitive-class> <primitive-procedure>
+  <opaque-struct> <struct>)
+#||
 ;;; TODO: Keywords
 (add-method initialize
   (make-method (list <generic>)
@@ -1676,13 +1756,6 @@
 
 ;;; ---------------------------------------------------------------------------
 ;;; Customization variables
-
-(define *default-method-class*      (make-parameter <method>))
-(define *default-generic-class*     (make-parameter <generic>))
-(define *default-class-class*       (make-parameter <class>))
-(define *default-entityclass-class* (make-parameter <entity-class>))
-
-(define *default-object-class* (make-parameter #f))
 
 (define *make-safely* (make-parameter #f))
 
