@@ -10,6 +10,29 @@
 (provide tiny-clos-suite)
 
 (define-test-suite tiny-clos-suite
+  (test-case
+   "merge-sorted-keyword-lists 1"
+   (let-values ([(keys vals)
+		 (merge-sorted-keyword-lists '(#:a #:c) '(a1 c1)
+					     '(#:b #:d) '(b2 d2))])
+     (check-equal? keys '(#:a #:b #:c #:d))
+     (check-equal? vals '(a1 b2 c1 d2))))
+
+  (test-case
+   "merge-sorted-keyword-lists 1"
+   (let-values ([(keys vals)
+		 (merge-sorted-keyword-lists '(#:b #:d #:e) '(b1 d1 e1)
+					     '(#:a #:c) '(a2 c2))])
+     (check-equal? keys '(#:a #:b #:c #:d #:e))
+     (check-equal? vals '(a2 b1 c2 d1 e1))))
+
+  (test-case
+   "merge-sorted-keyword-lists 3"
+   (let-values ([(keys vals)
+		 (merge-sorted-keyword-lists '(#:a #:c #:x)     '(a1 c1 x1)
+					     '(#:b #:c #:d #:e) '(b2 c2 d2 e2))])
+     (check-equal? keys '(#:a #:b #:c #:c #:d #:e #:x))
+     (check-equal? vals '(a1 b2 c1 c2 d2 e2 x1))))
 
   (test-case
    "raise* 1"
