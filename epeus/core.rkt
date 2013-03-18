@@ -63,13 +63,13 @@
 ;;; In addition to calling a generic, the entry points to the default base
 ;;; language are:
 ;;;
-;;;   (MAKE-CLASS name list-of-superclasses list-of-slot-names)
+;;;   (MAKE-CLASS name list-of-superclasses list-of-slots)
 ;;;   (MAKE-GENERIC-FUNCTION)
 ;;;   (MAKE-METHOD #:name [name '-anonymous-] list-of-specializers procedure)
 ;;;   (ADD-METHOD generic method)
 ;;;
-;;;   (MAKE class . initargs)
-;;;   (INITIALIZE instance initargs) ; Add methods to this, dont call directly.
+;;;   (MAKE <keyword-arg> ... class)
+;;;   (INITIALIZE <keyword-arg> ... instance) ; Add methods to this, dont call directly.
 ;;;
 ;;;   (SLOT-REF    object slot-name)
 ;;;   (SLOT-SET!   object slot-name new-value)
@@ -129,11 +129,12 @@
 ;;;; Instances
 ;;;; =========
 
-;;; Then, we need to build what, in a more real implementation, would be the
-;;; interface to the memory subsystem: instances and entities.  The former are
-;;; used for instances of instances of <class>; the latter are used for
-;;; instances of instances of <entity-class>.  In this MOP, none of this is
-;;; visible to base- or MOP-level programmers.
+;;; We need to build what, in a more real implementation, would be the interface
+;;; to the memory subsystem: instances and entities.  The former are used for
+;;; instances of instances of <class>; the latter are used for instances of
+;;; instances of <entity-class> (i.e., instances that can be called like
+;;; procedures).  In this MOP, none of this is visible to base- or MOP-level
+;;; programmers.
 ;;; A few things to note, that have influenced the way all this is done:
 ;;;   - R4RS doesn't provide a mechanism for specializing the
 ;;;     behavior of the printer for certain objects.
@@ -156,8 +157,6 @@
 ;; Basic allocation follows, all was in a single let, but this is not needed
 ;; with Racket's modules.  Also modified to use simple structs for
 ;; everything, including entities since PLT has applicable struct objects.
-
-;;; TODO: Add support for printing instances in a more meaningful way. 
 
 ;;; TODO: Define the following functions as generic functions
 (define (print-object obj port mode)
@@ -207,10 +206,9 @@
 			   (vector object-equal? 
 				   object-hash
 				   object-secondary-hash))
-		     ;; Note: need to define the procedure as
-		     ;; property, not as direct (8th) argument to
-		     ;; `make-struct-type', otherwise keyword
-		     ;; arguments are not recognized.
+		     ;; Note: need to define the procedure as property, not as
+		     ;; direct (8th) argument to `make-struct-type', otherwise
+		     ;; keyword arguments are not recognized.
 		     (cons prop:procedure %the-instance-proc))
 		    (current-inspector)))
 

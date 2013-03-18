@@ -56,8 +56,17 @@
 
 (provide procedure-accepts-keywords?)
 (define (procedure-accepts-keywords? fun)
-  (define-values (kws req-kws) (procedure-keywords fun))
-  (not (and (null? kws) (null? req-kws))))
+  (define-values (req-kws kws) (procedure-keywords fun))
+  (not (null? kws)))
+
+(provide procedure-keyword-status)
+(define (procedure-keyword-status fun)
+  (define-values (req-kws kws) (procedure-keywords fun))
+  (values (cond [(null? kws) 'none]
+                [(false? kws) 'all]
+                [else 'some])
+          req-kws
+          kws))
 
 (provide find-keyword-value)
 (define (find-keyword-value kw kws kw-args [default #f])
@@ -84,24 +93,35 @@
 	   (values
 	    (append-reverse result-kws kws-1)
 	    (append-reverse result-kw-args kw-args-1))]
-	  ;; Use the value from kws-1 first when the keywords are equal
-	  [(keyword<? (first kws-2) (first kws-1))
-	   (loop (cons (first kws-2) result-kws)
-		 (cons (first kw-args-2) result-kw-args)
-		 kws-1
-		 kw-args-1
-		 (rest kws-2)
-		 (rest kw-args-2))]
-	  [else
-	   (loop (cons (first kws-1) result-kws)
+	  ;; To satisfy the requirements in the racket spec we need to generate a
+	  ;; list of distinct keywords.  Maybe we should provide an additional
+	  ;; argument to resolve this case or raise an error? Right now it seems
+	  ;; the simplest solution is to use the value from kws-1 when the
+	  ;; keywords are equal.
+          [(eq? (first kws-1) (first kws-2))
+           (loop (cons (first kws-1)     result-kws)
+                 (cons (first kw-args-1) result-kw-args)
+                 (rest kws-1)
+                 (rest kw-args-1)
+                 (rest kws-2)
+                 (rest kw-args-2))]
+	  [(keyword<? (first kws-1) (first kws-2))
+	   (loop (cons (first kws-1)     result-kws)
 		 (cons (first kw-args-1) result-kw-args)
 		 (rest kws-1)
 		 (rest kw-args-1)
 		 kws-2
-		 kw-args-2)])))
+		 kw-args-2)]
+	  [else
+	   (loop (cons (first kws-2)     result-kws)
+		 (cons (first kw-args-2) result-kw-args)
+		 kws-1
+		 kw-args-1
+		 (rest kws-2)
+		 (rest kw-args-2))])))
 
 (provide extract-allowed-keywords)
-(define (extract-allowed-keywords actual-kws actual-kw-args allowed-kws)
+(define (extract-allowed-keywords allowed-kws actual-kws actual-kw-args)
   (let loop ([result-kws '()]
              [result-kw-args '()]
              [actual-kws actual-kws]
@@ -240,3 +260,10 @@
 
 (provide false-func)
 (define false-func (lambda args #f))
+;;; Add some additional indentation information for emacs
+
+#||
+Local Variables:
+fill-column: 82
+End:
+||#
