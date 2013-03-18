@@ -25,24 +25,29 @@
 ;;; TODO: For bootstrapping purposes only - remove once the system is actually
 ;;; running.
 (provide define-placeholder)
-(define-syntax-rule (define-placeholder name)
-  (define name 'placeholder))
+(define-syntax (define-placeholder stx)
+  (syntax-parse stx
+    [(_ name:id)
+     #'(define name 'placeholder)]))
 
 ;;; TODO: For bootstrapping purposes only - remove once the system is actually
 ;;; running.
 (provide define-placeholders)
-(define-syntax-rule (define-placeholders name ...)
-  (begin
-    (define-placeholder name) ...))
+(define-syntax (define-placeholders stx)
+  (syntax-parse stx
+    [(_ name:id ...)
+     #'(begin
+         (define-placeholder name) ...)]))
 
 
 ;;;; Support for tests
 ;;;; -----------------
 
 (provide provide-test-export)
-(define-syntax-rule (provide-test-export id0 id ...)
-  (module+ test-exports (provide id0 id ...)))
-
+(define-syntax (provide-test-export stx)
+  (syntax-parse stx
+    [(_ name:id ...+)
+     #'(module+ test-exports (provide name ...))]))
 
 
 ;;;; Definition Definitions
@@ -50,64 +55,73 @@
 
 (provide define/macro)
 (define-syntax (define/macro stx)
-  (syntax-case stx ()
-    [(_ (name args ...) body ...)
-     (identifier? #'name)
+  (syntax-parse stx
+    [(_ (name:id arg:id ...) body:expr ...)
      (with-syntax ([macro-name (datum->syntax #'name
                                               (format-symbol "%~a" #'name)
                                               #'name)])
        #'(begin
-           (define (name args ...)
+           (define (name arg ...)
              body ...)
-           (define-syntax-rule (macro-name args ...)
+           (define-syntax-rule (macro-name arg ...)
              body ...)))]))
 
 
 ;;;; Keyword Procedures
 ;;;; ------------------
 
-(provide make-keyword-procedure-0)
-(define-syntax-rule (make-keyword-procedure-0 proc)
-  (procedure-reduce-keyword-arity
-   (make-keyword-procedure proc)
-   (arity-at-least 0)
-   '()
-   #f))
+(provide make-keyword-procedure-at-least-n)
+(define-syntax-rule (make-keyword-procedure-at-least-n stx)
+  (syntax-parse stx
+    [(_ n:nat proc:expr)
+     (procedure-reduce-keyword-arity
+      (make-keyword-procedure proc)
+      (arity-at-least n)
+      '()
+      #f)]))
 
-(provide make-keyword-procedure-1)
-(define-syntax-rule (make-keyword-procedure-1 proc)
-  (procedure-reduce-keyword-arity
-   (make-keyword-procedure proc)
-   (arity-at-least 1)
-   '()
-   #f))
+(provide (for-syntax arg opt-arg))
+(begin-for-syntax
 
-(provide make-keyword-procedure-n)
-(define-syntax-rule (make-keyword-procedure-n n proc)
-  (procedure-reduce-keyword-arity
-   (make-keyword-procedure proc)
-   (arity-at-least n)
-   '()
-   #f))
+  (define-syntax-class arg
+    (pattern id:id)
+    (pattern [id:id default:expr]))
+
+  (define-syntax-class opt-arg
+    (pattern [id:id default:expr])))
+
+(define-for-syntax (arity-between m n)
+  (if (m . > . n)
+      null
+      (list* m (arity-between (add1 m) n))))
 
 (provide kw-lambda)
 (define-syntax (kw-lambda stx)
-  (syntax-case stx ()
-    [(_ (kws kw-args pos-arg ...) body ...)
+  (syntax-parse stx
+    [(_ (kws:id kw-args:id 
+         req-arg:id ... opt-arg:opt-arg ...)
+        body:expr ...+)
      #`(procedure-reduce-keyword-arity
         (make-keyword-procedure
-         (lambda (kws kw-args pos-arg ...)
+         (lambda (kws kw-args req-arg ... opt-arg ...)
            body ...))
-        #,(length (syntax-e #'(pos-arg ...)))
-        '()
+        '#,(let ([req-args (syntax-e #'(req-arg ...))]
+                 [opt-args (syntax-e #'(opt-arg ...))])
+             (if (null? opt-args)
+                 (length req-args)
+                 (arity-between (length req-args)
+                                (+ (length req-args) (length opt-args)))))
+        null
         #f)]
-    [(_ (kws kw-args pos-arg ... . rest-arg) body ...)
+    [(_ (kws:id kw-args:id 
+         req-arg:id ... opt-arg:opt-arg ... . rest-arg:id)
+        body:expr ...+)
      #`(procedure-reduce-keyword-arity
         (make-keyword-procedure
-         (lambda (kws kw-args pos-arg ... . rest-arg)
+         (lambda (kws kw-args req-arg ... opt-arg ... . rest-arg)
            body ...))
-        (arity-at-least #,(length (syntax-e #'(pos-arg ...))))
-        '()
+        (arity-at-least #,(length (syntax-e #'(req-arg ...))))
+        null
         #f)]))
 
 
@@ -116,5 +130,5 @@
 
 (provide generic->property-descriptor)
 (define-syntax (generic->property-descriptor stx)
-  (syntax-case stx ()
-    [(_ id) (car (syntax-local-value #'id))]))
+  (syntax-parse stx
+    [(_ id:id) (first (syntax-local-value #'id))]))
